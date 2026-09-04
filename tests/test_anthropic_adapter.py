@@ -206,3 +206,32 @@ def test_from_env_raises_clear_error_without_anthropic_package(monkeypatch):
     monkeypatch.setattr(adapter_module, "anthropic", None)
     with pytest.raises(ImportError, match="anthropic"):
         adapter_module.AnthropicLLMAdapter.from_env()
+
+
+def test_provider_failure_records_sanitized_last_error_and_success_clears_it():
+    client = FakeAnthropicClient(
+        responses=[
+            ConnectionError("Authorization: Bearer sk-supersecret123456789"),
+            _text_response(VALID_APPRAISAL_JSON),
+        ]
+    )
+    adapter = AnthropicLLMAdapter(client)
+
+    assert adapter.extract_appraisal(_observation(), _goal_state()) is None
+    assert adapter.last_error is not None
+    assert "ConnectionError" in adapter.last_error
+    assert "supersecret" not in adapter.last_error
+    assert "[REDACTED]" in adapter.last_error
+
+    assert adapter.extract_appraisal(_observation(), _goal_state()) is not None
+    assert adapter.last_error is None
+
+
+def test_generation_failure_records_last_error():
+    client = FakeAnthropicClient(responses=[ConnectionError("network is down")])
+    adapter = AnthropicLLMAdapter(client)
+
+    with pytest.raises(GeneratorError):
+        adapter.generate(_generation_contract())
+
+    assert adapter.last_error == "ConnectionError: network is down"

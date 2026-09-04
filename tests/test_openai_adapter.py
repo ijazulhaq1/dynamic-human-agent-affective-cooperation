@@ -415,3 +415,37 @@ def test_constructor_raises_clear_error_without_openai_package_and_no_client(mon
     monkeypatch.setattr(adapter_module, "openai", None)
     with pytest.raises(ImportError, match="openai"):
         adapter_module.OpenAILLMAdapter()
+
+
+# ---------------------------------------------------------------------------
+# Researcher-only provider diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_provider_failure_records_sanitized_last_error_and_success_clears_it():
+    client = FakeOpenAIClient(
+        responses=[
+            ConnectionError("api_key=sk-supersecret123456789"),
+            _text_response(VALID_APPRAISAL_JSON),
+        ]
+    )
+    adapter = OpenAILLMAdapter(client)
+
+    assert adapter.extract_appraisal(_observation(), _goal_state()) is None
+    assert adapter.last_error is not None
+    assert "ConnectionError" in adapter.last_error
+    assert "supersecret" not in adapter.last_error
+    assert "[REDACTED]" in adapter.last_error
+
+    assert adapter.extract_appraisal(_observation(), _goal_state()) is not None
+    assert adapter.last_error is None
+
+
+def test_generation_failure_records_last_error():
+    client = FakeOpenAIClient(responses=[ConnectionError("network is down")])
+    adapter = OpenAILLMAdapter(client)
+
+    with pytest.raises(GeneratorError):
+        adapter.generate(_generation_contract())
+
+    assert adapter.last_error == "ConnectionError: network is down"

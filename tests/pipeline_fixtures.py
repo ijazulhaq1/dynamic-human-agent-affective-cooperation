@@ -38,6 +38,7 @@ def build_pipeline(
     model_id: str = "mock-model-v0",
     generate_responses: list = (),
     extract_responses: list = (),
+    adapter=None,
 ):
     """Wires one Pipeline exactly the way a real caller (Phase 7's UI, or a
     test) would: one MockLLMAdapter serving both AppraisalEstimator and
@@ -55,7 +56,10 @@ def build_pipeline(
     re-reading the JSONL file back off disk.
     """
     config = load_default_config()
-    adapter = MockLLMAdapter(responses=list(extract_responses), generate_responses=list(generate_responses))
+    if adapter is None:
+        adapter = MockLLMAdapter(
+            responses=list(extract_responses), generate_responses=list(generate_responses)
+        )
 
     observation_builder = ObservationBuilder()
     estimator = AppraisalEstimator(adapter, confidence_map_from_config(config))
