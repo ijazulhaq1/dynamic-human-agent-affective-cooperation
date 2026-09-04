@@ -12,8 +12,8 @@ tests must be green before the next phase starts.
 | 0 | `config/*.yaml`, `models/*.py` (all Pydantic schemas incl. `Turn`) | **done** — `tests/test_schemas.py`, 42/42 green |
 | 1 | `services/observation_builder.py`, `derived_features.py`, `state_transition.py` | **done** — `tests/test_observation_builder.py`, `test_derived_state.py`, `test_transition.py`, 39/39 green |
 | 2 | `services/policy_engine.py` + `policy_engine_task_focused.py` + Rule table | **done** — `tests/test_policy.py`, `test_policy_task_focused.py`, `test_state_relevance.py`, 119/119 green (whole suite) |
-| 3 | `llm/adapter.py` (mock first), `appraisal_estimator.py` | **done** — `tests/test_appraisal_estimator.py`, 133/133 green (whole suite) |
-| 4 | `response_generator.py` + fallback templates | not started |
+| 3 | `llm/adapter.py` (mock first), `appraisal_estimator.py` | **done** — `tests/test_appraisal_estimator.py`, 134/134 green (whole suite) |
+| 4 | `response_generator.py` + fallback templates | **done** — `tests/test_generator_isolation.py`, 182 passed + 6 intentionally skipped (whole suite) |
 | 5 | `pipeline.py`, `experiment_controller.py`, `goal_state_manager.py`, `outcome_baseline.py`, `logger.py` | not started |
 | 6 | `demo_fixture.yaml` tuned to the analytical check, wired through `compare()` | not started |
 | 7 | `ui/*` (Streamlit), real `llm/adapter.py` backend | not started |
@@ -90,9 +90,10 @@ pytest -v
   "required_evidence_formula"`; "unc/amb" reuses R_CLARIFY's own h_unc/d_amb
   gates; "eligible"/"independently eligible" = R_ACK's own condition
   evaluated on the same Ctx. These are documented, defensible choices, not
-  verbatim from the frozen specification — please re-check them against the
-  source spec (not just the blueprint's compressed table) before Phase 3
-  wires PolicyEngine into the live estimator loop.
+  verbatim from the frozen specification. **Reviewed before freeze**: this
+  review is what caught the `evidence_available()` conflation documented
+  immediately below (Phase 2's fix round) — the operationalizations above
+  reflect the reviewed, post-fix state.
 - `NO_UNDUE_INFLUENCE` is an unconditional hard constraint, always in
   `PolicyState.hard_constraints` (implementation-review fix: previously
   branched on `GoalState.no_undue_influence`, a plain bool a researcher could
@@ -146,14 +147,75 @@ pytest -v
   vector" for every other turn/run that hits the fallback path afterward —
   the blueprint requires the fallback's VALUES be a constant, not that every
   caller share one mutable instance).
-- `llm/adapter.py`'s `MockLLMAdapter` is Phase 3's own scriptable test
-  double (a queue of canned raw responses + call recording), **not** the
+- `llm/adapter.py`'s `MockLLMAdapter` is this project's own scriptable test
+  double (queues of canned responses + call recording for both
+  `extract_appraisal` and, as of Phase 4, `generate`), **not** the
   demo-fixture-replay `MockAdapter` the blueprint's §6.8 prose describes for
   offline rehearsal — that one replays `demo_fixture.yaml`'s frozen
-  H_t/c_t/D_t values, which don't exist in this repo yet (Phase 6). The
-  `LLMAdapter` Protocol currently declares only `extract_appraisal`;
-  `generate()` (used by `ResponseGenerator`, Phase 4) is added to the same
-  Protocol once `GenerationContract` exists, not built ahead of that phase.
+  H_t/c_t/D_t values, which don't exist in this repo yet (Phase 6).
+- **Phase 4 documented implementation choices were reviewed before freeze.**
+  The blueprint gives `ResponseGenerator.generate()`'s own body verbatim
+  (§6.6/§20.9) but never shows `GenerationContract`'s field types,
+  `QUALITATIVE_CUES`'s actual dict contents (only one fragmentary example,
+  "engagement has grown across the conversation"), `FallbackTemplates`'s
+  body or any per-Policy wording, `GeneratorError`'s definition,
+  `_relevant()`/`_relevant_goal_fields()`'s bodies, or whether `generate()`
+  is expected to raise (as opposed to `extract_appraisal`, which the
+  blueprint's own Phase 3 pseudocode never wraps in try/except). The
+  decisions below were reviewed and, except for one fix, accepted as-is;
+  kept here as audit documentation:
+  - `generate()` DOES raise on failure (`TimeoutError` or the new
+    `GeneratorError`, defined in `llm/adapter.py`) — the deliberate
+    opposite of `extract_appraisal`'s never-raises contract, directly
+    evidenced by `ResponseGenerator.generate()`'s own explicit
+    `except (TimeoutError, GeneratorError):` clause, which
+    `AppraisalEstimator.estimate()` never has.
+  - `GenerationContract` (`llm/adapter.py`) is a plain class, not a
+    Pydantic `BaseModel` — nothing in it needs range validation or JSON
+    round-tripping; it exists only to cross one in-process call.
+  - `QUALITATIVE_CUES` (`services/response_generator.py`) is an
+    authored-for-this-prototype dict covering all eight `RationaleCode`
+    members (though only five — `REDIRECT_ELIGIBLE`, `CLARIFY_NEEDED`,
+    `INFORM_NEEDED`, `ACKNOWLEDGE_ELIGIBLE`, `MINIMAL_SUPPORT` — can ever
+    actually appear when `state_did_influence_policy=True`, per
+    `PolicyEngine._reached_a_t_sensitive_rule`'s reachability). Every
+    entry is non-numeric by construction; a test asserts no digit appears
+    in any of them. **A researcher should review/replace this wording
+    before a real study — it was not transcribed from any spec.**
+  - `_relevant()`/`_relevant_goal_fields()` (`services/response_generator.py`)
+    strip only known computation-internal keys
+    (`d_goal_override`/`d_amb_override`/`required_evidence` from
+    `task_context`; `goal_version`/`update_source`/`no_undue_influence`
+    from `GoalState`) and pass everything else through unchanged.
+    `_relevant()` keeps its `g_t` parameter (matching the blueprint's exact
+    call-site signature) even though this implementation doesn't filter by
+    its content — no field-selection rule ties task_context relevance to
+    GoalState content anywhere in the blueprint.
+  - `FallbackTemplates` (`llm/fallback.py`) wording (one primary template
+    + one secondary clause per `Policy`, plus one realized clause per
+    `hard_constraints` entry) is entirely authored for this prototype —
+    the blueprint specifies only the structural requirement (primary +
+    secondary + hard_constraints all represented, never silence). **Also
+    needs a researcher's review before a real study.**
+  - **Post-delivery fix**: the first version of `FallbackTemplates.render()`
+    printed `hard_constraints` as a parenthetical of the raw internal
+    codes — e.g. `"(AUTONOMY_HIGH, NO_UNDUE_INFLUENCE noted.)"` — straight
+    into participant-facing text. Those are control labels
+    (`services/policy_engine.py._hard_constraints()`), never meant to
+    reach a participant, and this is the LLM-failure fallback path — the
+    output that's supposed to be the most controlled and safety-checked
+    the system produces. Fixed via `_HARD_CONSTRAINT_CLAUSES`, a dict
+    mapping each known code to an authored natural-language clause
+    (`"AUTONOMY_HIGH"` → "The choice remains yours, and I won't push you
+    toward a particular option."; `"NO_UNDUE_INFLUENCE"` → "I won't use
+    pressure or emotional leverage to influence your decision."). An
+    unrecognized hard-constraint code now raises `ValueError` from
+    `render()` rather than being silently dropped — fail loudly in testing
+    rather than let a safety-relevant constraint go unrealized in a live
+    run. Every code `_hard_constraints()` can currently produce
+    (`NO_UNDUE_INFLUENCE` unconditionally, `AUTONOMY_HIGH` conditionally)
+    has an entry; a third code would need a clause added here before it
+    could reach `render()` without raising.
 - Phase 6's `demo_fixture.yaml` is where the actual frozen demo-turn scenario
   content (Turn 1 / Turn 2 task context, value priorities, etc.) from the
   specification's §19.9/§20.15 belongs, and only there — it hasn't been
