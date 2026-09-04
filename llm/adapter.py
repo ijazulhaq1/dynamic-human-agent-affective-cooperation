@@ -37,11 +37,19 @@ does.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol
 
 from models.enums import Policy
 from models.goal_state import GoalState
 from models.observation import Observation, Turn
+
+try:  # pragma: no cover — exercised implicitly whenever the optional dependency is present
+    import anthropic
+except ImportError:  # pragma: no cover — exercised only in an environment without the package
+    anthropic = None  # AnthropicLLMAdapter.from_env() raises a clear error in this case;
+    # AnthropicLLMAdapter itself (dependency-injected client) still works without the
+    # real package installed, since every test constructs it with a fake client double.
 
 
 class GeneratorError(Exception):
@@ -181,3 +189,256 @@ class MockLLMAdapter:
         if isinstance(outcome, type) and issubclass(outcome, BaseException):
             raise outcome()
         return outcome
+
+
+class OfflineDemoAdapter:
+    """Unlimited, deterministic offline/replay backend for app.py's Mock
+    (offline/replay) UI mode (Phase 7) — NOT a test double, and deliberately
+    NOT MockLLMAdapter above.
+
+    Post-delivery fix (user review of the first Phase 7 delivery): app.py
+    originally used MockLLMAdapter, scripted with exactly as many responses
+    as the frozen demo scenario's own two-turn, three-condition run needs.
+    MockLLMAdapter's queues are intentionally ONE-SHOT — many other test
+    files in this repo rely on its "called more times than it was scripted
+    for" AssertionError as a safety net catching an unexpected extra call —
+    but that same behavior is wrong for a live UI a researcher can click an
+    unbounded number of times: Pipeline.replay_turn() (§20.14) reuses a
+    past turn's stored H_t/D_t/A*_t but ALWAYS re-invokes the generator
+    (services/pipeline.py's own replay_turn(), built and frozen in Phase 5
+    — not something this phase may change), so "run the demo, then replay
+    any turn" already calls generate() more times than any finite queue
+    scripted for exactly one demo run could ever cover. The exhaustion
+    AssertionError would surface as a live crash mid-interview — directly
+    contradicting the "offline/replay fallback" being the RELIABLE path.
+
+    Fixed by building a second, purpose-specific adapter instead of
+    changing MockLLMAdapter's own exhaustion behavior (which would weaken a
+    safety net most of this repo's OTHER tests still want): OfflineDemoAdapter
+    never raises "called more times than scripted" at all — it is
+    unlimited by construction, so replay, a second demo run without a
+    Reset, or any other repeated call sequence a researcher's own clicking
+    might produce all stay deterministic and network-free indefinitely.
+
+    - extract_appraisal(): looks up the fixture's own frozen H_t by
+      o_t.turn_id in a dict built once at construction — deterministic and
+      repeatable for any turn_id in the fixture, any number of times.
+      Returns None for a turn_id outside the fixture (defensive; the
+      frozen 2-turn demo scenario never triggers this) — extract_appraisal's
+      own "None means no usable extraction" contract already makes
+      AppraisalEstimator handle that safely (retry, then FALLBACK_APPRAISAL),
+      never a crash.
+    - generate(): GenerationContract carries no turn_id at all (see this
+      module's own GenerationContract docstring), so there is no frozen
+      per-turn text to "replay" the way extract_appraisal's H_t is replayed
+      — this returns one deterministic, policy-derived placeholder string
+      per call instead. Response WORDING was never part of what Phase 6
+      analytically verifies (only D_t/A*_t/A_t/policy are); this class
+      exists to keep the offline/replay path from crashing, not to author
+      a second set of natural-language demo responses.
+    """
+
+    def __init__(self, raw_appraisal_by_turn_id: dict[int, dict[str, Any]]) -> None:
+        self._raw_appraisal_by_turn_id = dict(raw_appraisal_by_turn_id)
+
+    def extract_appraisal(
+        self, o_t: Observation, g_t: GoalState, repair: bool = False
+    ) -> dict[str, Any] | None:
+        raw = self._raw_appraisal_by_turn_id.get(o_t.turn_id)
+        return dict(raw) if raw is not None else None
+
+    def generate(self, contract: GenerationContract) -> str:
+        secondary = f" +{contract.secondary_policy.value}" if contract.secondary_policy is not None else ""
+        return f"[offline demo response — policy={contract.policy.value}{secondary}, no network call made]"
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """Shared by AnthropicLLMAdapter.generate() below. Python's builtin
+    TimeoutError always counts (matching MockLLMAdapter's own generate_
+    responses contract above, and ResponseGenerator's except clause, which
+    both already treat builtin TimeoutError as THE timeout signal) — plus,
+    when the real `anthropic` package is installed, its own
+    anthropic.APITimeoutError, so a genuine network-level timeout from the
+    real API is classified the same way a scripted one is in tests."""
+    if isinstance(exc, TimeoutError):
+        return True
+    if anthropic is not None and isinstance(exc, anthropic.APITimeoutError):
+        return True
+    return False
+
+
+def _extract_text(response: Any) -> str:
+    """Pulls the first text block out of an Anthropic Messages API
+    response's own `.content` list (a list of content blocks, each with a
+    `.type`; only "text" blocks carry `.text` — a real response could in
+    principle include other block types this prototype never requests,
+    e.g. tool_use, so this skips anything that isn't text rather than
+    assuming content[0] is always text). Raises ValueError (caught by both
+    of this adapter's own methods, see below) if no text block is present
+    — an empty/non-text response is a generation failure, not a "" success."""
+    for block in getattr(response, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", None)
+            if text:
+                return text
+    raise ValueError("Anthropic response contained no text content block")
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    """Best-effort parse of one JSON object out of `text` — the shape
+    build_appraisal_extraction_prompt() (llm/prompts.py) asks the model to
+    return. Strips a markdown code fence if the model wrapped its answer in
+    one despite being asked not to (```json ... ``` or ``` ... ```) — real
+    models do this often enough that treating it as a hard failure would
+    throw away perfectly good extractions. Returns None (never raises) for
+    anything that isn't a JSON object after that — malformed JSON, a JSON
+    array/string/number instead of an object, or empty text — matching
+    extract_appraisal's own "None means no usable structured output"
+    contract (this module's own docstring); AppraisalEstimator._validate()
+    is the layer that checks individual field values/ranges, not this one."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.startswith("json"):
+            stripped = stripped[4:]
+        stripped = stripped.strip()
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+class AnthropicLLMAdapter:
+    """The real, API-backed LLMAdapter implementation (§2's own technology-
+    stack table: "LLM adapter... Provider-agnostic interface... Swappable
+    API/local/mock backend"). Phase 3-6 only ever needed MockLLMAdapter;
+    this is Phase 7's "real llm/adapter.py backend" (blueprint §10).
+
+    Judgment call (documented gap, flagged for review): the blueprint
+    specifies the ADAPTER INTERFACE exactly (extract_appraisal/generate's
+    signatures and failure contracts — see LLMAdapter's own docstrings
+    above) but never names a specific LLM provider anywhere — "provider-
+    agnostic" is the whole point of the interface. Anthropic's Claude API
+    was chosen here as the one concrete backend actually built, since this
+    prototype's own development environment is Claude-based and the
+    `anthropic` Python SDK's Messages API is a well-documented, directly
+    testable target — not because the frozen specification names Anthropic
+    anywhere. A researcher who wants a different provider (or a local
+    model) can implement a second class satisfying the same LLMAdapter
+    Protocol; nothing elsewhere in this codebase imports AnthropicLLMAdapter
+    by name (AppraisalEstimator/ResponseGenerator only ever depend on the
+    LLMAdapter Protocol), so swapping is a one-line change at whichever
+    call site constructs the adapter (app.py, Phase 7's own entry point).
+
+    Dependency-injected `client` (constructor parameter, not a global) so
+    this class is unit-testable with a fake double — no real API key or
+    network access required for tests (see tests/test_anthropic_adapter.py)
+    — matching MockLLMAdapter's own zero-network testability above. `client`
+    is expected to expose `.messages.create(model=..., max_tokens=...,
+    temperature=..., system=..., messages=[...])` returning an object with
+    a `.content` list of blocks (see _extract_text above) — exactly
+    anthropic.Anthropic()'s own real shape, so a fake double in tests
+    exercises the SAME parsing code a real response would.
+    """
+
+    # Judgment call (documented gap, flagged for review): a model identifier
+    # is not, and cannot be, "frozen" the way config/default.yaml's numeric
+    # thresholds are — provider model strings change over time independent
+    # of anything in this codebase. This default is a reasonable current
+    # choice, but a researcher should treat it as configuration, not a
+    # constant: override it via the `model` constructor parameter or
+    # from_env()'s own `model` argument, not by editing this line.
+    DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+    DEFAULT_MAX_TOKENS = 1024
+
+    def __init__(
+        self,
+        client: Any,
+        model: str = DEFAULT_MODEL,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = 0.0,
+    ) -> None:
+        self._client = client
+        self._model = model
+        self._max_tokens = max_tokens
+        self._temperature = temperature
+
+    @property
+    def model(self) -> str:
+        """Public accessor for the configured model id — app.py (Phase 7)
+        reads this to populate TurnRecord.model_id when constructing a
+        Pipeline around this adapter, rather than reaching into the
+        otherwise-private self._model directly."""
+        return self._model
+
+    @classmethod
+    def from_env(cls, model: str = DEFAULT_MODEL, **kwargs: Any) -> "AnthropicLLMAdapter":
+        """Constructs a REAL, network-calling adapter: `anthropic.Anthropic()`
+        reads ANTHROPIC_API_KEY from the environment itself (the SDK's own
+        documented behavior, not reimplemented here). Lazy-imported inside
+        this method (module-level import above is already soft/optional) so
+        importing llm.adapter — and constructing AnthropicLLMAdapter directly
+        with an injected client, as every test in this repo does — never
+        requires the `anthropic` package or any credential to be present;
+        only this one specific entry point does."""
+        if anthropic is None:
+            raise ImportError(
+                "AnthropicLLMAdapter.from_env() requires the 'anthropic' package "
+                "('pip install anthropic') and an ANTHROPIC_API_KEY environment variable."
+            )
+        return cls(anthropic.Anthropic(), model=model, **kwargs)
+
+    def extract_appraisal(
+        self, o_t: Observation, g_t: GoalState, repair: bool = False
+    ) -> dict[str, Any] | None:
+        """Never raises (see LLMAdapter.extract_appraisal's own docstring
+        above) — malformed JSON, a missing field (checked one layer up, by
+        AppraisalEstimator._validate(), not here), AND any transport-level
+        failure (network error, auth failure, rate limit, timeout) are all
+        the same "None" outcome from this method's point of view, exactly
+        as MockLLMAdapter's own responses queue already models with a bare
+        `None` entry."""
+        from llm.prompts import build_appraisal_extraction_prompt  # local import: see llm/prompts.py's
+
+        # own module docstring for why prompts.py cannot import GenerationContract from this module
+        # at the top level (circular import) — this module importing prompts.py locally, only inside
+        # the two methods that need it, keeps the dependency one-directional at call time too, not
+        # just in the type-checking-only annotation prompts.py uses for its own imports.
+        system, user = build_appraisal_extraction_prompt(o_t, g_t, repair=repair)
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            text = _extract_text(response)
+        except Exception:
+            return None
+        return _parse_json_object(text)
+
+    def generate(self, contract: GenerationContract) -> str:
+        """Raises TimeoutError or GeneratorError on failure (the deliberate
+        OPPOSITE of extract_appraisal's never-raises contract — see this
+        module's own docstring for why). ResponseGenerator is the layer
+        that catches both and falls back to FallbackTemplates; this method
+        itself must not swallow either."""
+        from llm.prompts import build_generation_prompt  # local import — see extract_appraisal's own note
+
+        system, user = build_generation_prompt(contract)
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            text = _extract_text(response)
+        except Exception as exc:
+            if _is_timeout(exc):
+                raise TimeoutError(str(exc)) from exc
+            raise GeneratorError(str(exc)) from exc
+        return text

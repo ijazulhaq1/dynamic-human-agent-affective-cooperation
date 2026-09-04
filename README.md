@@ -16,7 +16,7 @@ tests must be green before the next phase starts.
 | 4 | `response_generator.py` + fallback templates | **done** — `tests/test_generator_isolation.py`, 182 passed + 6 intentionally skipped (whole suite) |
 | 5 | `pipeline.py`, `experiment_controller.py`, `goal_state_manager.py`, `outcome_baseline.py`, `logger.py` | **done** — `tests/test_conditions.py`, `test_outcome_baseline.py`, `test_replay.py`, `test_experiment_controller.py` (+ `test_goal_state_manager.py`, `test_logger.py`), 219 passed + 6 intentionally skipped (whole suite) |
 | 6 | `demo_fixture.yaml` tuned to the analytical check, wired through `compare()` | **done** — `tests/test_demo_fixture.py`, 225 passed + 6 intentionally skipped (whole suite) |
-| 7 | `ui/*` (Streamlit), real `llm/adapter.py` backend | not started |
+| 7 | `ui/*` (Streamlit), real `llm/adapter.py` backend | **fix round reviewed and passed — ready to push/tag** — `tests/test_llm_prompts.py`, `test_anthropic_adapter.py`, `test_state_manager.py`, `test_app_smoke.py`, 260 passed + 6 intentionally skipped (whole suite, rerun including Streamlit `AppTest` — up from 257 passed). Blueprint's own gate is a MANUAL researcher acceptance step — see the Phase 7 notes below for exactly what is and isn't automated, and the "Phase 7 fix round" notes for the three blockers + two smaller issues corrected after the first delivery's review, plus the second-round documentation-only fix. |
 
 ## Running the tests
 
@@ -24,6 +24,21 @@ tests must be green before the next phase starts.
 pip install -r requirements.txt
 pytest -v
 ```
+
+## Running the app
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Opens with the **Mock (offline/replay)** backend selected by default (no
+`ANTHROPIC_API_KEY` needed, no network calls made) — click "Run
+demo_fixture.yaml (both turns, all three conditions)" to rehearse the frozen,
+analytically-verified Phase 6 scenario end to end. Switch to **Anthropic
+(live)** in the sidebar (and set `ANTHROPIC_API_KEY`, or paste one into the
+sidebar field) for live, free-text rehearsal against a real model. See "Phase
+7" below for exactly what this delivery does and does not verify on its own.
 
 ## Notes for whoever picks this up next
 
@@ -545,3 +560,274 @@ pytest -v
      both `a_info` and `a_intv`) — corrected above, where those margins are
      first described, rather than restated a third time here.
   - Result: 225 passed + 6 intentionally skipped (up from 223 passed).
+- **Phase 7 (`llm/prompts.py`, `llm/adapter.py`'s `AnthropicLLMAdapter`,
+  `services/state_manager.py`, `ui/*.py`, `app.py`) is the largest
+  authored-content phase in this project — everything below should be
+  reviewed against the frozen specification directly, same caveat already
+  attached to every earlier phase's authored wording.** Phase 7's own build-
+  order line (§10) is short — "`ui/*` (Streamlit), real `llm/adapter.py`
+  backend" — and its gate is explicitly a **manual researcher acceptance
+  step**, not a pytest target: "Full live rehearsal × 10 (§16.2, §20.17);
+  offline/replay fallback verified with network disabled." Two things worth
+  saying plainly before the rest of this section: (1) this delivery cannot
+  complete that gate on its own — it needs a real `ANTHROPIC_API_KEY` and a
+  human interviewer/participant exchange for the ten-live-turn half, and a
+  human actually disconnecting the network for the "verified with network
+  disabled" half; (2) what this delivery DOES do is build everything needed
+  to perform both halves, and get the automatable slice of the second half
+  (the app launches and runs the frozen demo scenario end to end with zero
+  network calls) actually verified by `tests/test_app_smoke.py`, using
+  Streamlit's own headless `AppTest`. Run `streamlit run app.py` yourself
+  (see "Running the app" above) to complete the parts only a human can.
+
+  - **A genuine inconsistency inside the blueprint itself, resolved here
+    (not merely an underspecified body — see `services/state_manager.py`'s
+    own module docstring for the full reasoning):** §3's repo layout names
+    `services/state_manager.py` ("session lifecycle, goal_version
+    bookkeeping") but §10's own build-order table never assigns it to ANY
+    phase — Phase 5's line names `pipeline.py`, `experiment_controller.py`,
+    `goal_state_manager.py`, `outcome_baseline.py` and `logger.py`
+    explicitly and omits `state_manager.py`, and no later line mentions it
+    either. Two readings were considered: (a) it's redundant naming,
+    already fully covered by `ExperimentController`/`GoalStateManager`; (b)
+    it names a genuinely missing piece — `Pipeline`'s own docstring already
+    assumes a "caller" that holds the current `G_t` across calls, but
+    nothing built through Phase 6 ever needed to, since every test/demo-
+    fixture caller just constructs a `GoalState` locally. Reading (b) was
+    adopted: `SessionState` is that caller layer, built now because
+    Streamlit's rerun-the-whole-script-every-interaction model is the
+    FIRST real caller this codebase has that must persist "the current
+    session" at all. **A researcher should confirm this reading against
+    the frozen specification directly** — the blueprint's own §3/§10
+    disagreement isn't resolved by anything else in it.
+  - `llm/prompts.py` (structured-extraction prompt template, named but
+    given no body anywhere in the blueprint — same gap `llm/fallback.py`'s
+    `FallbackTemplates` and `services/response_generator.py`'s
+    `QUALITATIVE_CUES` already had in earlier phases). Two prompt pairs:
+    `build_appraisal_extraction_prompt()` (schema = `HumanAppraisal`'s own
+    field table, field-for-field, so a compliant LLM response is exactly
+    what `AppraisalEstimator._validate()` already expects — no second
+    schema to keep in sync) and `build_generation_prompt()` (structurally
+    cannot leak raw `A_t`, since `GenerationContract` has no `a_t`/`a_star`
+    field at all — `tests/test_llm_prompts.py` additionally greps the
+    rendered prompt text itself for every `AgentState` field name, in case
+    a future wording edit ever names one by accident). **All prompt wording
+    is authored for this prototype and should be reviewed/replaced by a
+    researcher before a real study**, same standing caveat as every other
+    authored-wording module in this codebase.
+  - `llm/adapter.py`'s `AnthropicLLMAdapter` — the real, network-calling
+    `LLMAdapter` implementation Phase 3-6 never needed (`MockLLMAdapter`
+    covered every test/demo-fixture use through Phase 6). **Judgment call:
+    the blueprint specifies the adapter INTERFACE exactly but never names a
+    concrete LLM provider anywhere** — "provider-agnostic" is the whole
+    point of the interface (§2's own technology-stack table). Anthropic's
+    Claude API was chosen as the one concrete backend actually built, since
+    this prototype's own development environment is Claude-based and the
+    `anthropic` SDK's Messages API is a well-documented, directly-testable
+    target — not because the frozen specification names Anthropic anywhere.
+    Swapping providers is a one-line change at `app.py`'s own adapter-
+    construction call sites, since `AppraisalEstimator`/`ResponseGenerator`
+    only ever depend on the `LLMAdapter` Protocol, never on
+    `AnthropicLLMAdapter` by name. Dependency-injected `client` constructor
+    parameter (matching `MockLLMAdapter`'s own zero-network testability) —
+    every test in `tests/test_anthropic_adapter.py` constructs one with a
+    fake client double shaped exactly like the real SDK's own response
+    object, so the SAME parsing code a real response would hit is what
+    tests actually exercise; only the network call itself is faked.
+    `DEFAULT_MODEL` is a plain configuration default, explicitly documented
+    as NOT frozen the way `config/default.yaml`'s numeric thresholds are —
+    provider model identifiers go stale over time independent of anything
+    in this codebase; override it, don't treat the current value as load-
+    bearing.
+  - `ui/*.py` (`interaction_view.py`, `researcher_dashboard.py`,
+    `experiment_controls.py`, `trajectory_view.py`) — one module per §8's
+    own UI component-map row (four rows folded into `researcher_dashboard.py`,
+    since all four read off ONE condition's own `TurnRecord` with no
+    derivation of their own: Human/Goals panel, Agent State panel — rho
+    shown separately, never inside `A_t`, per §20.16 — Policy panel, and
+    Status bar). Every module is a pure, read-only renderer of data `app.py`
+    already produced via `ExperimentController`; none of them call a
+    service directly, matching this project's existing services-vs-UI
+    separation. **Layout/wording is authored, not specified** — the
+    blueprint gives each component's data source but no visual design.
+  - `app.py` — the one real entry point. Wires a `Pipeline`/
+    `ExperimentController`/`SessionState` per Streamlit session, offers two
+    backend modes in the sidebar (documented at the top of the file: Mock
+    = the "offline/replay fallback verified with network disabled" half of
+    Phase 7's gate, Anthropic = the "full live rehearsal × 10" half), and
+    is the first real caller of `compute_config_hash()` over ALL FOUR
+    runtime YAML files together (`default.yaml` + `conditions.yaml` +
+    `policy_rules.yaml` + `demo_fixture.yaml`) — the exact "REMINDER for
+    Phase 6/7 integration" `services/pipeline.py`'s own
+    `compute_config_hash()` docstring left open back in the Phase 5 fix
+    round; Phase 0-6's own tests deliberately hashed `default.yaml` alone,
+    sufficient for their own narrower scope per that same docstring.
+  - Post-delivery corrections, self-caught before this delivery (not user-
+    found): (1) `ui/researcher_dashboard.py`'s `st.table()` calls originally
+    mixed types (float/bool/dict/enum) within one column, which Streamlit's
+    own pyarrow-based table serializer cannot cleanly infer — it silently
+    recovers by stringifying, but only after logging a full traceback per
+    failed column on every rerun; fixed by `str()`-casting each such column
+    before it reaches `st.table()`, which renders identically with no log
+    spam. (2) The "New Run / Reset Demo" button originally called
+    `SessionState.reset()` on the EXISTING session — correct for a live-only
+    caller, but wrong for Mock mode specifically: Mock's adapter carries a
+    one-shot, pre-scripted extract/generate queue that a same-object reset
+    would leave already-exhausted, so a second demo-scenario run after
+    Reset would hit `MockLLMAdapter`'s own "called more times than it was
+    scripted for" `AssertionError`. Fixed by discarding the whole
+    `SessionState` on reset and letting the normal init path rebuild a
+    fresh adapter with a freshly-reloaded queue instead — correct for both
+    backends, caught by `tests/test_app_smoke.py`'s own
+    `test_demo_scenario_runs_again_cleanly_after_reset`, which specifically
+    drives run → reset → run again. `SessionState.reset()` itself is
+    unchanged and still correct for a caller with no such one-shot state to
+    lose (a live-only session, a notebook, a future UI) — see its own
+    docstring in `services/state_manager.py` for why `app.py` doesn't use
+    it after this fix.
+  - `requirements.txt` gained `streamlit>=1.63` and `anthropic>=1.3` —
+    Phase 0-6 never needed either.
+  - Result: 257 passed + 6 intentionally skipped (up from 225 passed).
+
+- **Phase 7 fix round (independent review of the first Phase 7 delivery
+  found three blockers and two smaller issues; all five are corrected
+  below, verified by rerunning the full suite — 260 passed + 6 intentionally
+  skipped, up from 257 passed, INCLUDING the Streamlit `AppTest`-dependent
+  files, which the reviewer's own environment could not run — no network
+  and no `streamlit` install there).** This round is targeted fixes, not a
+  redesign, per the reviewer's own framing.
+
+  1. **Blocker — the "one-variable intervention" control mutated `G_t`,
+     which is the wrong intervention.** The first draft's
+     `ui/experiment_controls.py` let a researcher change
+     `GoalState.stakes`/`autonomy_weight`/`safety_risk` mid-run through
+     `GoalStateManager` under the label "one-variable intervention."
+     Changing `G_t` changes the mechanism upstream of `D_t`/`A*_t`/`A_t`,
+     so it demonstrates a *different* experiment than the frozen
+     acceptance criterion actually names — "changing `a_info`, `a_intv`,
+     or `rho` can change `P_t` without changing user text or `H_t`." `rho`
+     is the one variable this codebase already has a clean, non-mutating
+     way to vary in isolation: `Pipeline.replay_turn()` (§20.14, frozen
+     Phase 5 code, `services/pipeline.py`) reuses a turn's own stored
+     `H_t`/`c_t`/`D_t`/`A*_t` and only re-runs persistence-apply →
+     policy-select → generate at a different `rho` — never touching `G_t`,
+     never mutating the original `TurnRecord`. **Fix:** `ui/experiment_
+     controls.py` was rewritten to drop the `G_t`-mutating control
+     entirely; `ExperimentControlsResult` no longer has an `intervention`
+     field, only `rho_override` (for a brand-new live turn, logged on that
+     turn's own `TurnRecord.interventions`) and `replay_request` (a
+     `(turn_id, condition, rho_override)` tuple driving `replay_turn()` on
+     a *past* turn, additively, without touching the original record).
+     `app.py`'s intervention-handling block was removed to match.
+     `SessionState.apply_explicit_goal_update()` itself is unchanged and
+     still available to a programmatic caller for a genuinely different
+     kind of intervention (an explicit human preference change) — it is
+     simply no longer exposed under the "one-variable intervention" label,
+     which is now reserved for the frozen `rho`-isolation demonstration.
+     See `ui/experiment_controls.py`'s own module docstring for the full
+     reasoning.
+  2. **Blocker — offline replay crashed after a full demo run.** The first
+     draft's Mock backend used `MockLLMAdapter` (a Phase 3 test double)
+     with a `generate_responses` queue scripted for exactly one demo pass.
+     `Pipeline.replay_turn()` *always* re-invokes the generator, even
+     though it reuses the original record's own stored `H_t`/`c_t`/`D_t`/
+     `A*_t` rather than re-estimating them — this is frozen Phase 5
+     behavior, not something Phase 7 can change. So replaying any turn
+     after the demo had already run through all three conditions (which
+     itself consumes the queue) hit `MockLLMAdapter`'s own "called more
+     times than it was scripted for" `AssertionError` — a test-safety-net
+     behavior that is correct and load-bearing for `MockLLMAdapter`'s many
+     other callers across the test suite, so weakening it was not an
+     option. **Fix:** a new class, `OfflineDemoAdapter` (`llm/adapter.py`),
+     deliberately separate from `MockLLMAdapter` — unlimited and
+     deterministic rather than a one-shot scripted queue. It answers
+     `extract_appraisal()` by turn_id from `demo_fixture.yaml`'s own frozen
+     `raw_appraisal` values (exactly what the demo needs, any number of
+     times) and `generate()` with a fixed, clearly-labeled placeholder
+     string built from the contract's own policy/secondary-policy — never
+     empty, never exhausted. `app.py`'s `_init_mock_session()` now builds
+     one of these instead of a `MockLLMAdapter`. **Regression test added**
+     per the reviewer's own exact request — "run demo -> replay Turn 2
+     DYNAMIC -> no exception" — as
+     `tests/test_app_smoke.py::test_replay_after_full_demo_does_not_raise`:
+     loads the app, clicks "Run demo_fixture.yaml," then drives the
+     "Replay a past turn" control to turn 2 / DYNAMIC and clicks "Replay,"
+     asserting no exception at any step.
+  3. **Blocker — replay results were shown as a transient text-only
+     banner, not state/policy panels.** The first draft's replay handling
+     rendered only an `st.success()` message with the regenerated response
+     text. The reviewer's fix instruction: state/policy should be the
+     *default* replay presentation, with response-text regeneration
+     separately optional. Since `Pipeline.replay_turn()` always regenerates
+     the response text as a side effect (see point 2 — that is frozen
+     Phase 5 behavior, not optional at the `Pipeline` layer), "optional"
+     is implemented at the *display* layer instead. **Fix:** `app.py`
+     stores the `(original, replayed)` `TurnRecord` pair in
+     `st.session_state["last_replay"]` (cleared whenever a fresh demo or
+     live turn is recorded, or on reset) and a new function,
+     `ui/researcher_dashboard.py`'s `render_replay_comparison(original,
+     replayed)`, renders both records' Agent State and Policy panels
+     side-by-side (reusing the exact same `_render_agent_state_panel()`/
+     `_render_policy_panel()` helpers the live dashboard uses, so the two
+     views are visually identical and directly comparable) with the
+     regenerated response text tucked inside a collapsed-by-default
+     `st.expander("Regenerated response text (optional)", ...)`. If the
+     original record can't be located (e.g. session state was reset
+     between recording and replay), only the replayed side renders, with
+     a caption explaining why.
+  4. **Smaller issue — raw hard-constraint codes reached the real model
+     verbatim.** `build_generation_prompt()` (`llm/prompts.py`) originally
+     did `"; ".join(contract.hard_constraints)` straight into the prompt
+     sent to Anthropic, so a real model call could see literal internal
+     codes like `NO_UNDUE_INFLUENCE` and `AUTONOMY_HIGH` — the exact defect
+     `llm/fallback.py`'s own docstring already documents fixing for the
+     offline template path, just not yet fixed for the real-LLM path.
+     **Fix:** a new `_HARD_CONSTRAINT_INSTRUCTIONS` dict and
+     `_translate_hard_constraints()` helper in `llm/prompts.py` translate
+     every code `services/policy_engine.py._hard_constraints()` can ever
+     produce into a natural-language *instruction to the model* (not a
+     finished participant-facing sentence like `llm/fallback.py`'s own
+     clauses — the model is told what to realize in its own words, per
+     `GENERATION_SYSTEM_PROMPT`'s existing "never as a quoted phrase"
+     instruction). An unrecognized code raises `ValueError`, matching
+     `FallbackTemplates.render()`'s own safety discipline of never
+     silently forwarding or dropping an un-reviewed code.
+     `tests/test_llm_prompts.py`'s existing
+     `test_generation_prompt_embeds_policy_and_hard_constraints_and_cue`
+     (which asserted the raw code string appeared) was updated to assert
+     the opposite plus the translated wording; two tests were added
+     (`test_generation_prompt_translates_autonomy_high_constraint`,
+     `test_generation_prompt_raises_on_unrecognized_hard_constraint`).
+  5. **Smaller issue — "pre-elicited" wording was inaccurate once `G_t` can
+     change mid-run.** `build_appraisal_extraction_prompt()`'s user prompt
+     described value priorities as "the participant's own, pre-elicited
+     before this conversation" — inaccurate once `SessionState.apply_
+     explicit_goal_update()` has changed them mid-session, since
+     "pre-elicited" implies session-start values specifically. **Fix:**
+     reworded to "Current explicit value priorities (the participant's
+     own)."
+
+  All five fixes reviewed together against `llm/fallback.py`'s and
+  `services/pipeline.py`'s already-frozen, already-tested behavior rather
+  than introducing new mechanisms — every fix reuses or relabels existing,
+  correct machinery (`Pipeline.replay_turn()` for #1, a sibling adapter
+  class for #2 that doesn't touch `MockLLMAdapter`'s test-safety-net
+  behavior, the existing dashboard panel helpers for #3, `llm/fallback.py`'s
+  own already-fixed translation pattern for #4).
+  - Result: 260 passed + 6 intentionally skipped (up from 257 passed),
+    including `tests/test_app_smoke.py`'s Streamlit `AppTest`-based tests —
+    rerun on a machine with `streamlit` installed and network available,
+    since the reviewer's own environment has neither and could not run
+    that file (confirmed via a fresh extraction of the delivered zip).
+  - **Second-round fix (documentation only, no code/behavior change):** the
+    reviewer caught that `services/state_manager.py`'s
+    `apply_explicit_goal_update()` docstring still said `ui/experiment_
+    controls.py`'s "one-variable intervention" control was "this method's
+    one real caller" — true of the first Phase 7 delivery, stale after fix
+    #1 above replaced that control's mechanism (the rewritten
+    `ui/experiment_controls.py` never calls this method). Reworded to
+    state plainly that this method has no caller in `ui/*.py` as of the
+    fix round and remains available for a future/programmatic caller with
+    a genuinely different kind of explicit `GoalState` update to make.
+    Full suite rerun after this change: still 260 passed + 6 skipped (a
+    docstring-only edit, as expected).
