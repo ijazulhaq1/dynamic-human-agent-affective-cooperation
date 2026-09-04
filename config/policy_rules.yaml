@@ -1,0 +1,82 @@
+# config/policy_rules.yaml — canonical rule precedence tables (§20.7, §20.11.1).
+#
+# The priority order below IS the precedence — list order matters and must
+# match services.policy_engine's Rule list exactly (a later-phase test,
+# test_policy.py, checks this file and the code stay in sync). This file is
+# documentation-as-data: PolicyEngine's executable Rule objects are the
+# source of truth actually evaluated at runtime.
+
+# Affect-enabled algorithm (CURRENT_CUE / DYNAMIC), §20.7.
+affect_enabled:
+  - id: R_SAFETY
+    priority: 1
+    condition: "safety_risk >= 0.70"
+    primary: DEFER
+    secondary: "INFORM if evidence else CLARIFY"
+    reads_a_t: false
+  - id: R_LOW_CONF
+    priority: 2
+    condition: "c_t < 0.50"
+    primary: CLARIFY
+    secondary: INFORM
+    reads_a_t: false
+  - id: R_LOW_CTRL
+    priority: 3
+    condition: "h_ctrl < 0.40"
+    primary: "CLARIFY if unc/amb else INFORM"
+    secondary: "ACKNOWLEDGE if independently eligible"
+    reads_a_t: false
+  - id: R_REDIRECT
+    priority: 4
+    condition: "h_int >= 0.65 and a_intv >= 0.60 and a_info >= 0.55 and c_t >= 0.60 and safety_risk < 0.70"
+    primary: REDIRECT
+    secondary: "ACKNOWLEDGE else INFORM"
+    reads_a_t: true
+  - id: R_CLARIFY
+    priority: 5
+    condition: "h_unc >= 0.70 or d_amb >= 0.65 or d_goal >= 0.65"
+    primary: CLARIFY
+    secondary: "ACKNOWLEDGE/INFORM"
+    reads_a_t: false
+  - id: R_INFORM
+    priority: 6
+    condition: "a_info >= 0.55 or task_requires_evidence"
+    primary: INFORM
+    secondary: "ACKNOWLEDGE if eligible"
+    reads_a_t: true
+  - id: R_ACK
+    priority: 7
+    condition: "h_int >= 0.60 and h_rel >= 0.60 and c_t >= 0.60"
+    primary: ACKNOWLEDGE
+    secondary: "INFORM if required"
+    reads_a_t: false
+  - id: R_DEFAULT
+    priority: 8
+    condition: "otherwise"
+    primary: INFORM
+    secondary: null
+    reads_a_t: false
+
+# TASK_FOCUSED reduced algorithm, §20.11.1 — uses only G_t and the task-derived
+# half of D_t; H_t, c_t, A_t are structurally absent from every rule below.
+task_focused:
+  - id: TF_SAFETY
+    priority: 1
+    condition: "safety_risk >= 0.70"
+    primary: DEFER
+    secondary: "INFORM if evidence else CLARIFY"
+  - id: TF_TASK_CLARIFY
+    priority: 2
+    condition: "d_amb >= 0.65 or d_goal >= 0.65"
+    primary: CLARIFY
+    secondary: "INFORM if useful task evidence"
+  - id: TF_INFORM
+    priority: 3
+    condition: "task requires factual evidence"
+    primary: INFORM
+    secondary: null
+  - id: TF_DEFAULT
+    priority: 4
+    condition: "otherwise"
+    primary: INFORM
+    secondary: null

@@ -1,0 +1,34 @@
+# config/conditions.yaml — Condition -> mechanism-availability matrix (§20.11).
+#
+# This file documents what each condition is allowed to read/compute; it is
+# not itself the enforcement mechanism. The actual guarantees are structural,
+# in code:
+#   - TASK_FOCUSED never computing A*_t/A_t: Pipeline.run_turn()'s
+#     "if condition is not Condition.TASK_FOCUSED" guard (§9.1/§20.11.1).
+#   - rho always 0 for TASK_FOCUSED/CURRENT_CUE: ExperimentController.resolve_rho,
+#     which checks condition BEFORE any override (implementation-review fix —
+#     this file's "rho: 0.0" lines below are documentation, not the guarantee).
+#   - TASK_FOCUSED's policy never reading H_t/c_t/A_t: PolicyEngineTaskFocused's
+#     reduced rule table (policy_rules.yaml's task_focused section) structurally
+#     has no h_t/c_t/a_t-reading condition to evaluate.
+
+TASK_FOCUSED:
+  reads_human_appraisal: false      # H_t/c_t are still COMPUTED for dashboard logging,
+                                     # but never reach the policy layer (§6.7 fix)
+  computes_agent_state: false       # A*_t/A_t never computed (§9.1/§20.11.1)
+  policy_algorithm: reduced         # policy_engine_task_focused.py / TF_* rule table
+  rho: 0.0
+
+CURRENT_CUE:
+  reads_human_appraisal: true
+  computes_agent_state: true
+  policy_algorithm: affect_enabled  # policy_engine.py / R_* rule table
+  rho: 0.0                          # always exactly 0 — the SAME LinearPersistenceTransition
+                                     # code path as DYNAMIC, never a separate "no persistence" branch
+
+DYNAMIC:
+  reads_human_appraisal: true
+  computes_agent_state: true
+  policy_algorithm: affect_enabled
+  rho: rho_dynamic                  # resolved from default.yaml's transition.rho_dynamic via
+                                     # ExperimentController.resolve_rho — never a literal in this file
