@@ -12,7 +12,7 @@ tests must be green before the next phase starts.
 | 0 | `config/*.yaml`, `models/*.py` (all Pydantic schemas incl. `Turn`) | **done** — `tests/test_schemas.py`, 42/42 green |
 | 1 | `services/observation_builder.py`, `derived_features.py`, `state_transition.py` | **done** — `tests/test_observation_builder.py`, `test_derived_state.py`, `test_transition.py`, 39/39 green |
 | 2 | `services/policy_engine.py` + `policy_engine_task_focused.py` + Rule table | **done** — `tests/test_policy.py`, `test_policy_task_focused.py`, `test_state_relevance.py`, 119/119 green (whole suite) |
-| 3 | `llm/adapter.py` (mock first), `appraisal_estimator.py` | not started |
+| 3 | `llm/adapter.py` (mock first), `appraisal_estimator.py` | **done** — `tests/test_appraisal_estimator.py`, 133/133 green (whole suite) |
 | 4 | `response_generator.py` + fallback templates | not started |
 | 5 | `pipeline.py`, `experiment_controller.py`, `goal_state_manager.py`, `outcome_baseline.py`, `logger.py` | not started |
 | 6 | `demo_fixture.yaml` tuned to the analytical check, wired through `compare()` | not started |
@@ -69,7 +69,7 @@ pytest -v
   silently producing `evidence_ambiguity=0.0`. Use `"resolved"` (not
   `"confirmed"` or any other spelling) for a satisfied evidence requirement
   in every later phase and in Phase 6's demo fixture.
-- **Phase 2's rule-table judgment calls need a second look before Phase 3.**
+- **Phase 2 rule-table operationalizations were reviewed before freeze.**
   The blueprint's own §20.7/§20.11.1 table cells are compressed English, not
   exact formulas ("INFORM if evidence else CLARIFY", "CLARIFY if unc/amb else
   INFORM", "ACKNOWLEDGE if independently eligible/eligible", "INFORM if
@@ -113,6 +113,47 @@ pytest -v
   `build_affect_rules`/`build_task_focused_rules` lists exactly. If a rule is
   ever added/reordered in one, this fails fast rather than the two silently
   drifting apart.
+- **Phase 3's two documented gaps were reviewed before freeze** (same
+  treatment as Phase 2's rule-table calls). (1) The blueprint never says
+  whether `LLMAdapter.extract_appraisal` should raise on a transport failure
+  (network error/timeout) or fold that into the same outcome as malformed
+  JSON — `AppraisalEstimator.estimate()`'s own pseudocode (§7.1/§20.3) has no
+  try/except at all, only a `parsed is None` branch. The contract adopted in
+  `llm/adapter.py`: an `LLMAdapter` implementation must **never raise** from
+  `extract_appraisal` — a transport failure is reported by returning `None`,
+  exactly like malformed JSON, so `estimate()` stays a literal transcription
+  of the blueprint's own code rather than needing exception-handling the
+  blueprint never shows. Correspondingly, `AppraisalEstimator` never returns
+  `EstimatorStatus.ERROR` (that value exists on the enum but the estimator's
+  pseudocode never returns it) — `TurnRecord.appraisal`'s own note ("None
+  only on an unrecoverable estimator error") implies `ERROR` belongs to a
+  higher layer (Pipeline, Phase 5) catching something more catastrophic than
+  this class is designed to handle. Reviewed and accepted as-is; transport-
+  specific exception handling can be revisited when the real API-backed
+  adapter is built (Phase 7). (2) `_validate()`'s method body is never
+  shown in the blueprint — only its `None`-vs-`(h_t, evidence_strength)`
+  usage is. Implemented in `services/appraisal_estimator.py` as a direct
+  attempt to build a `HumanAppraisal` from a raw dict using exactly H_t's own
+  field names (§5.2's table) — no second, differently-named JSON schema is
+  invented — rejecting (returning `None`) on a non-dict raw, a missing
+  field, an out-of-range value, or an `evidence_strength` string that isn't
+  a real `EvidenceStrength` member.
+- `AppraisalEstimator.estimate()`'s fallback path returns
+  `FALLBACK_APPRAISAL.model_copy(deep=True)`, never the class-level constant
+  itself (implementation-review fix: `HumanAppraisal` is a plain mutable
+  `BaseModel`, so returning the same object on every fallback would let one
+  turn's `h_t.uncertainty = ...` corrupt the "exact, deterministic fallback
+  vector" for every other turn/run that hits the fallback path afterward —
+  the blueprint requires the fallback's VALUES be a constant, not that every
+  caller share one mutable instance).
+- `llm/adapter.py`'s `MockLLMAdapter` is Phase 3's own scriptable test
+  double (a queue of canned raw responses + call recording), **not** the
+  demo-fixture-replay `MockAdapter` the blueprint's §6.8 prose describes for
+  offline rehearsal — that one replays `demo_fixture.yaml`'s frozen
+  H_t/c_t/D_t values, which don't exist in this repo yet (Phase 6). The
+  `LLMAdapter` Protocol currently declares only `extract_appraisal`;
+  `generate()` (used by `ResponseGenerator`, Phase 4) is added to the same
+  Protocol once `GenerationContract` exists, not built ahead of that phase.
 - Phase 6's `demo_fixture.yaml` is where the actual frozen demo-turn scenario
   content (Turn 1 / Turn 2 task context, value priorities, etc.) from the
   specification's §19.9/§20.15 belongs, and only there — it hasn't been
