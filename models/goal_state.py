@@ -1,7 +1,7 @@
 """G_t and OutcomeBaseline — §8, §20.4 of the frozen specification, §5.3 of the Implementation Blueprint."""
 
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
@@ -31,7 +31,15 @@ class GoalState(BaseModel):
     task_constraints: dict[str, Any] | list[Any] = Field(default_factory=dict)  # rules, deadlines, evidence reqs
     autonomy_weight: float = Field(ge=0, le=1)      # >= 0.80 triggers AUTONOMY_HIGH (§20.8)
     safety_risk: float = Field(ge=0, le=1)          # >= 0.70 triggers R_SAFETY/TF_SAFETY
-    no_undue_influence: bool = True                 # hard constraint, always attached (§20.7 preamble)
+    no_undue_influence: Literal[True] = True
+    # Hard constraint, always attached (§20.7 preamble) — structurally, not by
+    # convention (implementation-review fix). This was previously a plain
+    # bool, and services.policy_engine._hard_constraints() read it as a
+    # researcher-controllable toggle: GoalState(no_undue_influence=False, ...)
+    # silently made the safeguard disappear from PolicyState.hard_constraints.
+    # Literal[True] makes that construction a ValidationError instead — the
+    # model and the policy layer now tell the same story: NO_UNDUE_INFLUENCE
+    # is unconditional, never data-dependent.
     goal_version: int = Field(default=1, ge=1)       # incremented on every allowed update
     update_source: GoalUpdateSource = GoalUpdateSource.RESEARCHER_CONFIG   # logged provenance
 

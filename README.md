@@ -11,7 +11,7 @@ tests must be green before the next phase starts.
 |---|---|---|
 | 0 | `config/*.yaml`, `models/*.py` (all Pydantic schemas incl. `Turn`) | **done** — `tests/test_schemas.py`, 42/42 green |
 | 1 | `services/observation_builder.py`, `derived_features.py`, `state_transition.py` | **done** — `tests/test_observation_builder.py`, `test_derived_state.py`, `test_transition.py`, 39/39 green |
-| 2 | `services/policy_engine.py` + `policy_engine_task_focused.py` + Rule table | not started |
+| 2 | `services/policy_engine.py` + `policy_engine_task_focused.py` + Rule table | **done** — `tests/test_policy.py`, `test_policy_task_focused.py`, `test_state_relevance.py`, 119/119 green (whole suite) |
 | 3 | `llm/adapter.py` (mock first), `appraisal_estimator.py` | not started |
 | 4 | `response_generator.py` + fallback templates | not started |
 | 5 | `pipeline.py`, `experiment_controller.py`, `goal_state_manager.py`, `outcome_baseline.py`, `logger.py` | not started |
@@ -69,6 +69,50 @@ pytest -v
   silently producing `evidence_ambiguity=0.0`. Use `"resolved"` (not
   `"confirmed"` or any other spelling) for a satisfied evidence requirement
   in every later phase and in Phase 6's demo fixture.
+- **Phase 2's rule-table judgment calls need a second look before Phase 3.**
+  The blueprint's own §20.7/§20.11.1 table cells are compressed English, not
+  exact formulas ("INFORM if evidence else CLARIFY", "CLARIFY if unc/amb else
+  INFORM", "ACKNOWLEDGE if independently eligible/eligible", "INFORM if
+  required", "task requires evidence"/"task requires factual evidence").
+  `PolicyEngine.select()`'s own signature (h_t, c_t, g_t, d_t, a_t, a_star —
+  no o_t/task_context) rules out reading `O_t.task_context` directly, so
+  `services/policy_engine.py`'s module docstring resolves all five from G_t/D_t
+  only: "evidence available" = `task_requires_evidence(ctx) AND
+  D_t.evidence_ambiguity` below the `clarify.d_amb_min` gate — BOTH a real
+  required_evidence structure was represented this turn AND it is
+  sufficiently resolved (implementation-review fix: this originally checked
+  evidence_ambiguity alone, which meant a turn with no required_evidence at
+  all — evidence_ambiguity=0.0 via the task_rule/no-signal default — read as
+  "evidence available" purely because ambiguity happened to be low; "no
+  evidence was asked for" and "evidence exists and is resolved" are not the
+  same construct, and R_SAFETY/TF_SAFETY's secondary now distinguishes them);
+  "task requires evidence" = `D_t.ambiguity_source ==
+  "required_evidence_formula"`; "unc/amb" reuses R_CLARIFY's own h_unc/d_amb
+  gates; "eligible"/"independently eligible" = R_ACK's own condition
+  evaluated on the same Ctx. These are documented, defensible choices, not
+  verbatim from the frozen specification — please re-check them against the
+  source spec (not just the blueprint's compressed table) before Phase 3
+  wires PolicyEngine into the live estimator loop.
+- `NO_UNDUE_INFLUENCE` is an unconditional hard constraint, always in
+  `PolicyState.hard_constraints` (implementation-review fix: previously
+  branched on `GoalState.no_undue_influence`, a plain bool a researcher could
+  set `False` to make the safeguard silently disappear). `GoalState.
+  no_undue_influence` is now `Literal[True]` — constructing a `GoalState`
+  with `no_undue_influence=False` is a `ValidationError`, so the model and
+  the policy layer tell the same story about this being a hard, always-on
+  normative safeguard alongside safety and autonomy.
+- `PolicyConfig` (in `services/policy_engine.py`) is constructor-injected from
+  `config/default.yaml`'s `policy_thresholds` + `goal_state.autonomy_high_threshold`
+  — same single-source-of-truth discipline as `LinearPersistenceTransition`'s
+  weights and `AppraisalEstimator`'s `confidence_map`.
+- `config/policy_rules.yaml`'s header comment promises "a later-phase test,
+  test_policy.py, checks this file and the code stay in sync" — that's
+  `test_affect_rule_table_matches_policy_rules_yaml` /
+  `test_task_focused_rule_table_matches_policy_rules_yaml`, which assert rule
+  ID order (and `reads_a_t` for the affect table) match the executable
+  `build_affect_rules`/`build_task_focused_rules` lists exactly. If a rule is
+  ever added/reordered in one, this fails fast rather than the two silently
+  drifting apart.
 - Phase 6's `demo_fixture.yaml` is where the actual frozen demo-turn scenario
   content (Turn 1 / Turn 2 task context, value priorities, etc.) from the
   specification's §19.9/§20.15 belongs, and only there — it hasn't been

@@ -209,6 +209,17 @@ def test_goal_state_missing_required_field_rejected():
         GoalState(stakes=0.5)  # missing objective, autonomy_weight, safety_risk
 
 
+def test_goal_state_rejects_no_undue_influence_false():
+    """NO_UNDUE_INFLUENCE is a hard, unconditional safeguard (§20.7 preamble)
+    — no_undue_influence is Literal[True], not a plain bool, so a
+    researcher cannot construct a GoalState that quietly turns it off
+    (implementation-review fix: services.policy_engine._hard_constraints()
+    previously branched on this field, so False silently dropped
+    NO_UNDUE_INFLUENCE from PolicyState.hard_constraints)."""
+    with pytest.raises(ValidationError):
+        _valid_goal_state(no_undue_influence=False)
+
+
 def test_observation_missing_required_field_rejected():
     with pytest.raises(ValidationError):
         Observation(user_text="hi")  # missing turn_id, timestamp
