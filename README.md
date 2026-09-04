@@ -16,7 +16,7 @@ tests must be green before the next phase starts.
 | 4 | `response_generator.py` + fallback templates | **done** — `tests/test_generator_isolation.py`, 182 passed + 6 intentionally skipped (whole suite) |
 | 5 | `pipeline.py`, `experiment_controller.py`, `goal_state_manager.py`, `outcome_baseline.py`, `logger.py` | **done** — `tests/test_conditions.py`, `test_outcome_baseline.py`, `test_replay.py`, `test_experiment_controller.py` (+ `test_goal_state_manager.py`, `test_logger.py`), 219 passed + 6 intentionally skipped (whole suite) |
 | 6 | `demo_fixture.yaml` tuned to the analytical check, wired through `compare()` | **done** — `tests/test_demo_fixture.py`, 225 passed + 6 intentionally skipped (whole suite) |
-| 7 | `ui/*` (Streamlit), real `llm/adapter.py` backend | **fix round reviewed and passed — ready to push/tag** — `tests/test_llm_prompts.py`, `test_anthropic_adapter.py`, `test_state_manager.py`, `test_app_smoke.py`, 260 passed + 6 intentionally skipped (whole suite, rerun including Streamlit `AppTest` — up from 257 passed). Blueprint's own gate is a MANUAL researcher acceptance step — see the Phase 7 notes below for exactly what is and isn't automated, and the "Phase 7 fix round" notes for the three blockers + two smaller issues corrected after the first delivery's review, plus the second-round documentation-only fix. |
+| 7 | `ui/*` (Streamlit), real `llm/adapter.py` backend (Anthropic + OpenAI) | **fix round reviewed and passed; OpenAI backend added post-approval, same status pending review** — `tests/test_llm_prompts.py`, `test_anthropic_adapter.py`, `test_openai_adapter.py`, `test_state_manager.py`, `test_app_smoke.py`, 285 passed + 6 intentionally skipped (whole suite, including Streamlit `AppTest` — up from 260 passed). Blueprint's own gate is a MANUAL researcher acceptance step — see the Phase 7 notes below, the "Phase 7 fix round" notes, and the "OpenAI support" notes for the full account of what changed and why. |
 
 ## Running the tests
 
@@ -32,13 +32,17 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Opens with the **Mock (offline/replay)** backend selected by default (no
-`ANTHROPIC_API_KEY` needed, no network calls made) — click "Run
-demo_fixture.yaml (both turns, all three conditions)" to rehearse the frozen,
-analytically-verified Phase 6 scenario end to end. Switch to **Anthropic
-(live)** in the sidebar (and set `ANTHROPIC_API_KEY`, or paste one into the
-sidebar field) for live, free-text rehearsal against a real model. See "Phase
-7" below for exactly what this delivery does and does not verify on its own.
+Opens with the **Offline** backend selected by default (no API key needed,
+no network calls made) — click "Run demo_fixture.yaml (both turns, all three
+conditions)" to rehearse the frozen, analytically-verified Phase 6 scenario
+end to end. Switch to **OpenAI** or **Anthropic** in the sidebar (and set
+`OPENAI_API_KEY`/`ANTHROPIC_API_KEY`, or paste one into the sidebar field —
+never displayed, stored, or logged in full) for live, free-text rehearsal
+against a real model; the sidebar always shows which backend and model id is
+currently active. Whichever live backend has an environment key present is
+selected by default (Anthropic taking priority if both are set); with neither
+key present, Offline stays the default. See "Phase 7" and "OpenAI support"
+below for exactly what this delivery does and does not verify on its own.
 
 ## Notes for whoever picks this up next
 
@@ -831,3 +835,147 @@ sidebar field) for live, free-text rehearsal against a real model. See "Phase
     a genuinely different kind of explicit `GoalState` update to make.
     Full suite rerun after this change: still 260 passed + 6 skipped (a
     docstring-only edit, as expected).
+
+- **OpenAI support (`llm/adapter.py`'s `OpenAILLMAdapter`, `llm/prompts.py`'s
+  `APPRAISAL_JSON_SCHEMA`, `app.py`'s three-way backend selector) — added
+  post-approval, at the user's own explicit request, as a THIRD optional
+  backend alongside Offline and Anthropic.** The user's own framing, quoted
+  because it is the actual acceptance criterion for everything below: "The
+  important rule is: do not change the scientific architecture at all.
+  OpenAI should only replace Anthropic at the two LLM boundaries: (1)
+  appraisal extraction (2) natural-language response generation. Everything
+  else must remain unchanged: `H_t -> D_t -> A*_t -> A_t -> P_t`." Nothing
+  in `Pipeline`, `AppraisalEstimator`, `StateTransition`, `PolicyEngine`,
+  `rho` logic, replay semantics, `TurnRecord`, or `demo_fixture.yaml` was
+  touched by this addition — `_build_pipeline()` (`app.py`) is the one and
+  only place a `Pipeline` gets constructed, and it is byte-for-byte
+  unmodified; only which `LLMAdapter` implementation gets handed to it
+  differs per backend. The Turn-2 result the user asked to be re-verified
+  after this addition (`CURRENT_CUE -> INFORM`, `DYNAMIC -> REDIRECT`) was
+  checked directly against a live `_init_mock_session()` run and is
+  unchanged.
+
+  - `llm/adapter.py`'s `OpenAILLMAdapter` — a strict sibling of
+    `AnthropicLLMAdapter`, not a replacement (`AnthropicLLMAdapter` itself
+    is untouched). Implements the same `LLMAdapter` Protocol
+    (`extract_appraisal`/`generate`, identical failure contracts: never
+    raises from `extract_appraisal`, raises `TimeoutError`/`GeneratorError`
+    from `generate` — see this class's own docstring for the full
+    reasoning, unchanged from `AnthropicLLMAdapter`'s). Uses the OpenAI
+    Responses API (`client.responses.create(...)`), not the older Chat
+    Completions API, per the user's own explicit instruction. Constructor
+    supports dependency injection (`client=None` — builds a real
+    `openai.OpenAI()` itself, reading `OPENAI_API_KEY` from the environment,
+    exactly as `anthropic.Anthropic()` already does for `ANTHROPIC_API_KEY`
+    — never a hardcoded key) and a configurable model (`model=None` resolves
+    to the `OPENAI_MODEL` environment variable, then `DEFAULT_MODEL =
+    "gpt-4o-mini"` — same "override-only default, not frozen" caveat already
+    attached to `AnthropicLLMAdapter.DEFAULT_MODEL`). Every test in
+    `tests/test_openai_adapter.py` constructs it with a fake client double,
+    exactly like `tests/test_anthropic_adapter.py` — no real network access,
+    API key, or the `openai` package's own runtime request behavior is ever
+    exercised by the test suite.
+  - **Same prompts, no OpenAI-specific scientific wording** (explicit user
+    requirement): `OpenAILLMAdapter.extract_appraisal()`/`generate()` call
+    the EXACT SAME `build_appraisal_extraction_prompt()`/
+    `build_generation_prompt()` functions (`llm/prompts.py`)
+    `AnthropicLLMAdapter` already calls — there is no second, OpenAI-
+    specific prompt-building function anywhere in this codebase. Both
+    providers therefore automatically inherit every scientific safeguard
+    already built into those shared functions, including the Phase 7 fix
+    round's own hard-constraint translation (`_translate_hard_constraints()`)
+    and "current explicit value priorities" wording — reused, not
+    reimplemented.
+  - **Structured Outputs for appraisal extraction, not free-form JSON-in-
+    prose** (explicit user requirement): `APPRAISAL_JSON_SCHEMA`
+    (`llm/prompts.py`) is a JSON Schema built directly from `HumanAppraisal`'s
+    own field table (`models/human_state.py`) — the same field names
+    `APPRAISAL_SYSTEM_PROMPT` already describes in prose for Anthropic, kept
+    as one machine-readable twin rather than a second, independently typed
+    schema that could drift from either. Sent via `text={"format": {"type":
+    "json_schema", "name": "human_appraisal", "schema": APPRAISAL_JSON_SCHEMA,
+    "strict": True}}`, so the API enforces schema conformance server-side.
+    `additionalProperties: false` and every field (including the nullable
+    `possible_affect` and the always-array `evidence_tags`) listed in
+    `required` is OpenAI's own `strict=True` constraint, not a change to
+    `HumanAppraisal`'s Pydantic definition — optionality is expressed via a
+    nullable JSON type, not field absence. `generate()` uses plain-text
+    output (no schema) since there is nothing to structurally enforce for
+    free-text generation — the causal-isolation rule is already structural
+    via `GenerationContract` having no `a_t`/`a_star` field at all, unchanged.
+  - **Error behavior, identical contract to Anthropic:** `extract_appraisal()`
+    catches every exception and returns `None` — timeout, auth failure,
+    network failure, and a malformed/empty response are all the same "no
+    usable extraction" outcome, letting `AppraisalEstimator`'s existing
+    retry/fallback behavior handle it exactly as it already does for
+    Anthropic. `generate()` maps a timeout (builtin `TimeoutError`, or a real
+    `openai.APITimeoutError`, both checked by `_is_openai_timeout()`) to
+    `TimeoutError`, and any other failure to `GeneratorError` — `_extract_
+    openai_text()` also treats OpenAI's own documented `output_text == ""`
+    empty-response case as a failure (raises internally, caught the same
+    way), matching `_extract_text()`'s equivalent empty-content check for
+    Anthropic. `ResponseGenerator`'s existing deterministic
+    `FallbackTemplates` fallback is exercised identically regardless of
+    which live backend raised.
+  - `app.py`'s backend selector is now three-way — `BACKEND_OPTIONS =
+    [OFFLINE_BACKEND, OPENAI_BACKEND, ANTHROPIC_BACKEND]` ("Offline" /
+    "OpenAI" / "Anthropic", replacing Phase 7's first-delivery "Mock
+    (offline/replay)" / "Anthropic (live)" labels). Whichever live backend
+    has an environment key present is preselected (Anthropic given priority
+    when both are present — a judgment call, since this combination wasn't
+    previously reachable; no acceptance criterion orders the two), Offline
+    otherwise. A sidebar caption always shows the active backend and model
+    id (`_init_*_session()` now each return `(SessionState, model_id)`
+    rather than `SessionState` alone). Neither API key field
+    (`type="password"`) nor either environment-presence flag is ever written
+    to `st.session_state`, logged, or included in `config_hash` — see this
+    module's own docstring for the explicit "secrets and config_hash" note
+    the user's requirement #8 asked for; `compute_config_hash()` is still
+    called on `_load_full_runtime_config()`'s return value only (the four
+    frozen `RUNTIME_CONFIG_FILES`), unchanged.
+  - `_init_openai_session(api_key)` mirrors `_init_live_session(api_key)`
+    field for field — `api_key=None` falls back to `openai.OpenAI()`'s own
+    `OPENAI_API_KEY` environment lookup; a sidebar-entered key is passed
+    through explicitly otherwise. Calls the same unmodified
+    `_build_pipeline()` every other backend calls.
+  - **Session/backend switching never reuses a Pipeline across providers**
+    (explicit user requirement #7): the existing `st.session_state.get(
+    "backend") != backend` guard already rebuilds a brand-new `SessionState`
+    (and therefore a brand-new `Pipeline`/`ExperimentController`) on ANY
+    backend change, not only an Offline-reset — this was true before this
+    addition and needed no new logic, only the three-way `elif` chain
+    calling the right `_init_*_session()`. `tests/test_app_smoke.py::
+    test_backend_switch_does_not_contaminate_state` drives exactly this:
+    run the Offline demo to completion, switch to OpenAI, and confirm the
+    new session starts with zero turns (not the Offline session's leftover
+    six-tab comparison view).
+  - `requirements.txt` gained `openai>=1.0` — Phase 0-7 (Anthropic-only)
+    never needed it.
+  - `tests/test_openai_adapter.py` (new, 22 tests) mirrors `tests/
+    test_anthropic_adapter.py`'s coverage almost line for line (successful
+    structured extraction, malformed/empty response, timeout, transport
+    failure, repair-flag propagation, successful/timeout/failure `generate()`
+    paths, `from_env()`/constructor error paths) plus the user's own explicit
+    non-negotiables as their own tests: no numeric `A_t`/`A*_t`/`rho` field
+    ever reaches the request sent to OpenAI
+    (`test_generate_never_leaks_agent_state_fields`), raw hard-constraint
+    codes are never sent (`test_generate_never_sends_raw_hard_constraint_
+    codes`), neither shared prompt ever requests chain-of-thought
+    (`test_prompts_never_request_chain_of_thought`), and `APPRAISAL_JSON_
+    SCHEMA` names exactly `HumanAppraisal`'s own fields, no more, no fewer
+    (`test_appraisal_json_schema_matches_human_appraisal_fields_exactly`).
+  - `tests/test_app_smoke.py` gained three OpenAI-specific tests (backend
+    stops cleanly with no key; a full live turn runs end to end through a
+    real `openai.OpenAI()` client with only the two LLM-boundary methods
+    faked — "instantiated with a fake client/config path," per the user's
+    own test requirement; backend switching doesn't leak state) and every
+    existing test's backend-label assertions were updated for the new
+    three-way selector. `test_app_loads_in_mock_backend_by_default_with_no_
+    api_key` was renamed `test_app_loads_in_offline_backend_by_default_
+    with_no_api_keys` and now guards against BOTH provider keys leaking in
+    from the real environment, not just Anthropic's.
+  - Result: 285 passed + 6 intentionally skipped (up from 260 passed).
+    `tests/test_demo_fixture.py`'s own 6 tests (the analytical Turn-2
+    `CURRENT_CUE -> INFORM` / `DYNAMIC -> REDIRECT` check among them) are
+    untouched by this addition and still pass unmodified — direct evidence
+    this addition changed no scientific result.

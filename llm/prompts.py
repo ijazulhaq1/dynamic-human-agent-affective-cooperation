@@ -53,7 +53,7 @@ issues #4 and #5):
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from models.enums import EvidenceStrength
 from models.goal_state import GoalState
@@ -69,6 +69,52 @@ if TYPE_CHECKING:
     from llm.adapter import GenerationContract
 
 _EVIDENCE_STRENGTH_VALUES = ", ".join(member.value for member in EvidenceStrength)
+
+# Added for OpenAI support (user request, kept alongside APPRAISAL_SYSTEM_PROMPT
+# below rather than in llm/adapter.py): OpenAI's Responses API supports
+# Structured Outputs — a JSON Schema the provider enforces server-side,
+# rather than merely instructing the model in prose and hoping it complies
+# (APPRAISAL_SYSTEM_PROMPT's own approach, which is what AnthropicLLMAdapter
+# still relies on — the Anthropic Messages API used here has no equivalent
+# constrained-decoding option). This schema is deliberately the machine-
+# readable TWIN of APPRAISAL_SYSTEM_PROMPT's own JSON description just
+# below — same field names, same value ranges (HumanAppraisal's own field
+# table, models/human_state.py) — built once, here, and imported by
+# OpenAILLMAdapter.extract_appraisal() (llm/adapter.py), so there is exactly
+# ONE authoritative description of "what an appraisal extraction must look
+# like" per representation (one prose, one JSON Schema), never a second,
+# independently hand-typed copy that could silently drift from either
+# APPRAISAL_SYSTEM_PROMPT or HumanAppraisal itself.
+#
+# additionalProperties=False and EVERY field (including possible_affect,
+# which HumanAppraisal itself allows to be None, and evidence_tags, which
+# HumanAppraisal defaults to []) listed in "required" is not optional here —
+# it is OpenAI's own strict=True Structured Outputs constraint: every
+# property named in "properties" must appear in "required", and optionality
+# is expressed by a nullable TYPE (`["string", "null"]`) rather than by a
+# field's absence. That is a transport-format detail of the OpenAI schema
+# only — it does not change HumanAppraisal's own Pydantic definition, and
+# AppraisalEstimator._validate() (unchanged) is still the sole authority on
+# what counts as an acceptable extraction once the dict reaches it.
+APPRAISAL_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "goal_relevance": {"type": "number", "minimum": 0, "maximum": 1},
+        "goal_congruence": {"type": "number", "minimum": -1, "maximum": 1},
+        "uncertainty": {"type": "number", "minimum": 0, "maximum": 1},
+        "perceived_control": {"type": "number", "minimum": 0, "maximum": 1},
+        "agency": {"type": "number", "minimum": 0, "maximum": 1},
+        "affect_intensity": {"type": "number", "minimum": 0, "maximum": 1},
+        "possible_affect": {"type": ["string", "null"]},
+        "evidence_tags": {"type": "array", "items": {"type": "string"}},
+        "evidence_strength": {"type": "string", "enum": [member.value for member in EvidenceStrength]},
+    },
+    "required": [
+        "goal_relevance", "goal_congruence", "uncertainty", "perceived_control",
+        "agency", "affect_intensity", "possible_affect", "evidence_tags", "evidence_strength",
+    ],
+    "additionalProperties": False,
+}
 
 # §5.2's own H_t field table, restated as a JSON schema description — see
 # models/human_state.py's HumanAppraisal for the authoritative field

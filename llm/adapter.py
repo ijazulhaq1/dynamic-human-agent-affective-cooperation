@@ -38,6 +38,7 @@ does.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Protocol
 
 from models.enums import Policy
@@ -50,6 +51,14 @@ except ImportError:  # pragma: no cover — exercised only in an environment wit
     anthropic = None  # AnthropicLLMAdapter.from_env() raises a clear error in this case;
     # AnthropicLLMAdapter itself (dependency-injected client) still works without the
     # real package installed, since every test constructs it with a fake client double.
+
+try:  # pragma: no cover — exercised implicitly whenever the optional dependency is present
+    import openai
+except ImportError:  # pragma: no cover — exercised only in an environment without the package
+    openai = None  # Same soft-import pattern as anthropic above: OpenAILLMAdapter's
+    # constructor only needs the real package when it has to build its OWN client
+    # (client=None); every test constructs it with a fake client double instead, so
+    # importing llm.adapter never requires 'openai' to be installed.
 
 
 class GeneratorError(Exception):
@@ -284,6 +293,37 @@ def _extract_text(response: Any) -> str:
     raise ValueError("Anthropic response contained no text content block")
 
 
+def _is_openai_timeout(exc: BaseException) -> bool:
+    """OpenAI counterpart to _is_timeout() above — same reasoning, same
+    shape, kept as a separate function rather than generalizing _is_timeout
+    itself so neither Anthropic's nor OpenAI's already-tested branch has to
+    change to accommodate the other provider's exception type."""
+    if isinstance(exc, TimeoutError):
+        return True
+    if openai is not None and isinstance(exc, openai.APITimeoutError):
+        return True
+    return False
+
+
+def _extract_openai_text(response: Any) -> str:
+    """Pulls the aggregated text out of an OpenAI Responses API response's
+    own `.output_text` convenience property (the SDK's own documented
+    accessor — see openai.types.responses.response.Response.output_text —
+    which aggregates every `output_text` content block across the
+    response's `output` list). That property returns "" rather than
+    raising when no text content is present (e.g. every output item was a
+    refusal, or the response was truncated before any text), so this
+    function raises ValueError in that case instead — the same "empty
+    response is a generation failure, not a '' success" contract
+    _extract_text() (above) already enforces for Anthropic, so both
+    providers' adapters fail the same way for the same underlying
+    condition."""
+    text = getattr(response, "output_text", None)
+    if not text:
+        raise ValueError("OpenAI response contained no output text")
+    return text
+
+
 def _parse_json_object(text: str) -> dict[str, Any] | None:
     """Best-effort parse of one JSON object out of `text` — the shape
     build_appraisal_extraction_prompt() (llm/prompts.py) asks the model to
@@ -439,6 +479,179 @@ class AnthropicLLMAdapter:
             text = _extract_text(response)
         except Exception as exc:
             if _is_timeout(exc):
+                raise TimeoutError(str(exc)) from exc
+            raise GeneratorError(str(exc)) from exc
+        return text
+
+
+class OpenAILLMAdapter:
+    """A second, optional real LLMAdapter implementation — OpenAI's
+    Responses API — added alongside AnthropicLLMAdapter above, at the
+    user's own request, as a live backend they can rehearse with using a
+    key they already hold. Satisfies the exact same LLMAdapter Protocol
+    (extract_appraisal/generate, same signatures, same failure contracts)
+    as AnthropicLLMAdapter, and is otherwise a strict sibling of it, not a
+    replacement: AnthropicLLMAdapter is unchanged, app.py's Mock/Offline
+    path is unchanged, and NOTHING about H_t -> D_t -> A*_t -> A_t -> P_t
+    changes — this class only ever sits at the same two boundaries
+    AnthropicLLMAdapter already sat at (extract_appraisal, generate), and
+    is invisible to Pipeline/AppraisalEstimator/ResponseGenerator/
+    PolicyEngine/StateTransition, all of which depend on the LLMAdapter
+    Protocol only, never on a concrete adapter class by name.
+
+    Same-prompt guarantee (explicit user requirement — "do NOT create
+    different scientific prompts for OpenAI and Anthropic"): both methods
+    below call the exact same llm/prompts.py functions
+    (build_appraisal_extraction_prompt/build_generation_prompt)
+    AnthropicLLMAdapter calls, with no OpenAI-specific wording branch
+    anywhere in this class or in prompts.py. The two providers differ only
+    in TRANSPORT (Responses API vs. Messages API) and, for appraisal
+    extraction, in HOW compliance with the shared schema is enforced (see
+    extract_appraisal's own docstring below) — never in what is being
+    asked.
+
+    Dependency-injected `client` (matching AnthropicLLMAdapter's own
+    testability — see tests/test_openai_adapter.py, which never touches
+    the real network or the `openai` package's own runtime behavior).
+    Unlike AnthropicLLMAdapter, `client` defaults to None: when the caller
+    doesn't inject one, the constructor builds a real `openai.OpenAI()`
+    itself, which reads OPENAI_API_KEY from the environment the same way
+    `anthropic.Anthropic()` reads ANTHROPIC_API_KEY — this class has no
+    equivalent of AnthropicLLMAdapter's separate from_env() classmethod
+    for that reason; a from_env() is still provided below for symmetry and
+    because app.py's own backend-construction call sites use it, but the
+    plain constructor already covers the "no client, use the environment"
+    case per the user's own explicit instruction. `model` defaults to None
+    too, resolved to OPENAI_MODEL (environment) or DEFAULT_MODEL, in that
+    order — never hardcoded, and never required to be passed at all.
+    """
+
+    # Judgment call (documented gap, flagged for review), same reasoning as
+    # AnthropicLLMAdapter.DEFAULT_MODEL above: not "frozen" the way
+    # config/default.yaml's numeric thresholds are — a reasonable current,
+    # override-only default (gpt-4o-mini: cheap, fast, and supports
+    # Structured Outputs with strict=True, which extract_appraisal below
+    # requires). Override via the `model` constructor parameter, the
+    # OPENAI_MODEL environment variable, or from_env()'s own `model`
+    # argument — never by editing this line and treating it as load-bearing.
+    DEFAULT_MODEL = "gpt-4o-mini"
+    DEFAULT_MAX_TOKENS = 1024
+
+    def __init__(
+        self,
+        client: Any = None,
+        model: str | None = None,
+        max_output_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = 0.0,
+    ) -> None:
+        if client is None:
+            if openai is None:
+                raise ImportError(
+                    "OpenAILLMAdapter requires the 'openai' package ('pip install openai') "
+                    "and an OPENAI_API_KEY environment variable when no client is injected."
+                )
+            client = openai.OpenAI()  # reads OPENAI_API_KEY from the environment itself —
+            # the SDK's own documented behavior, not reimplemented here (never hardcode a key).
+        self._client = client
+        self._model = model or os.environ.get("OPENAI_MODEL") or self.DEFAULT_MODEL
+        self._max_output_tokens = max_output_tokens
+        self._temperature = temperature
+
+    @property
+    def model(self) -> str:
+        """Public accessor for the configured model id — app.py reads this
+        to populate TurnRecord.model_id, exactly as it already does for
+        AnthropicLLMAdapter.model."""
+        return self._model
+
+    @classmethod
+    def from_env(cls, model: str | None = None, **kwargs: Any) -> "OpenAILLMAdapter":
+        """Constructs a REAL, network-calling adapter, explicitly — kept
+        for symmetry with AnthropicLLMAdapter.from_env() and because it is
+        the clearer call site inside app.py, even though the plain
+        constructor above already falls back to the same behavior when
+        client=None. Lazy-imported nowhere here since the module-level
+        `openai` soft-import above already covers it; only raises if the
+        package truly isn't installed."""
+        if openai is None:
+            raise ImportError(
+                "OpenAILLMAdapter.from_env() requires the 'openai' package ('pip install openai') "
+                "and an OPENAI_API_KEY environment variable."
+            )
+        return cls(openai.OpenAI(), model=model, **kwargs)
+
+    def extract_appraisal(
+        self, o_t: Observation, g_t: GoalState, repair: bool = False
+    ) -> dict[str, Any] | None:
+        """Never raises — identical contract to AnthropicLLMAdapter.
+        extract_appraisal above, and for the identical reason (this
+        module's own docstring): a transport failure, an auth failure, a
+        timeout, and a malformed/empty response are all the same "None"
+        outcome from this method's point of view.
+
+        Structured Outputs (JSON Schema, strict=True) rather than free-form
+        JSON-in-prose (explicit user requirement): APPRAISAL_JSON_SCHEMA
+        (llm/prompts.py) is built directly from HumanAppraisal's own field
+        table — the SAME field names APPRAISAL_SYSTEM_PROMPT already
+        describes in prose for Anthropic, not a second, independently
+        authored schema that could drift from it. Structured Outputs makes
+        the model's response schema-conformant BY CONSTRUCTION (the API
+        rejects/repairs non-conformant output on OpenAI's own side for
+        strict=True), so a successfully-returned response is always valid
+        JSON shaped like the schema; this method still runs it through
+        _parse_json_object() (shared with AnthropicLLMAdapter) rather than
+        assuming that, since AppraisalEstimator._validate() one layer up is
+        the actual authority on field-level acceptance (range checks,
+        EvidenceStrength membership) — this method's job is only to get a
+        parseable dict there or return None trying."""
+        from llm.prompts import APPRAISAL_JSON_SCHEMA, build_appraisal_extraction_prompt
+
+        system, user = build_appraisal_extraction_prompt(o_t, g_t, repair=repair)
+        try:
+            response = self._client.responses.create(
+                model=self._model,
+                instructions=system,
+                input=user,
+                temperature=self._temperature,
+                max_output_tokens=self._max_output_tokens,
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "human_appraisal",
+                        "schema": APPRAISAL_JSON_SCHEMA,
+                        "strict": True,
+                    }
+                },
+            )
+            text = _extract_openai_text(response)
+        except Exception:
+            return None
+        return _parse_json_object(text)
+
+    def generate(self, contract: GenerationContract) -> str:
+        """Raises TimeoutError or GeneratorError on failure — identical
+        contract to AnthropicLLMAdapter.generate above, for the identical
+        reason (this module's own docstring). Plain-text output (no `text=`
+        schema argument): unlike appraisal extraction, generation has no
+        structured shape to enforce — §20.9's causal-isolation rule is
+        already structural (GenerationContract carries no a_t/a_star field
+        at all, see this module's own docstring, and build_generation_
+        prompt()'s own docstring/tests), not something a JSON Schema could
+        add or subtract from."""
+        from llm.prompts import build_generation_prompt
+
+        system, user = build_generation_prompt(contract)
+        try:
+            response = self._client.responses.create(
+                model=self._model,
+                instructions=system,
+                input=user,
+                temperature=self._temperature,
+                max_output_tokens=self._max_output_tokens,
+            )
+            text = _extract_openai_text(response)
+        except Exception as exc:
+            if _is_openai_timeout(exc):
                 raise TimeoutError(str(exc)) from exc
             raise GeneratorError(str(exc)) from exc
         return text

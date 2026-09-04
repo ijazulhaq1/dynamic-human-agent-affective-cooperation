@@ -6,22 +6,35 @@ Blueprint §3 repo layout (app.py at the repository root) / §10 Phase 7
 
 Phase 7's own gate (§10): "Full live rehearsal × 10 (§16.2, §20.17);
 offline/replay fallback verified with network disabled." Both halves of
-that gate map directly onto this app's two backend modes, in the sidebar:
+that gate map directly onto this app's backend modes, in the sidebar:
 
-  - "Anthropic (live)" — AnthropicLLMAdapter (llm/adapter.py), a real,
+  - "Anthropic" — AnthropicLLMAdapter (llm/adapter.py), a real,
     network-calling backend. This is the "Full live rehearsal × 10" path —
     a researcher runs this app with a real ANTHROPIC_API_KEY and rehearses
     (at least) ten live turns end to end.
-  - "Mock (offline/replay)" — OfflineDemoAdapter (llm/adapter.py), driven
-    by config/demo_fixture.yaml's own frozen H_t values (services/
-    demo_fixture.py, Phase 6). This is the "offline/replay fallback
-    verified with network disabled" path — running this mode makes zero
-    network calls, so a researcher can literally disconnect the network and
-    confirm the demo scenario still runs end to end deterministically, any
-    number of times, including replaying past turns after the demo has
-    already run (see _init_mock_session()'s own docstring below for why
-    this is OfflineDemoAdapter and not MockLLMAdapter, the Phase 3 test
-    double used everywhere else in this codebase's own test suite).
+  - "OpenAI" — OpenAILLMAdapter (llm/adapter.py), added post-delivery at
+    the user's own explicit request as a SECOND, optional live backend,
+    strictly alongside Anthropic rather than replacing it — a researcher
+    with an OPENAI_API_KEY can rehearse live turns the same way, on a
+    provider they already hold a key for. See OpenAILLMAdapter's own
+    docstring (llm/adapter.py) for the user's exact non-negotiable: OpenAI
+    sits at the SAME two boundaries Anthropic already sat at (appraisal
+    extraction, response generation) and nowhere else — H_t -> D_t -> A*_t
+    -> A_t -> P_t is completely unaffected by which of the two live
+    backends is selected; _build_pipeline() below (used by every backend
+    branch, including this one) is proof of that by construction, since it
+    is the one and only place a Pipeline gets built, unmodified by this
+    addition.
+  - "Offline" — OfflineDemoAdapter (llm/adapter.py), driven by config/
+    demo_fixture.yaml's own frozen H_t values (services/demo_fixture.py,
+    Phase 6). This is the "offline/replay fallback verified with network
+    disabled" path — running this mode makes zero network calls, so a
+    researcher can literally disconnect the network and confirm the demo
+    scenario still runs end to end deterministically, any number of times,
+    including replaying past turns after the demo has already run (see
+    _init_mock_session()'s own docstring below for why this is
+    OfflineDemoAdapter and not MockLLMAdapter, the Phase 3 test double used
+    everywhere else in this codebase's own test suite).
 
 Neither acceptance check is something this codebase can complete on its
 own: §16.2/§20.17's ten-live-turn rehearsal needs a real API key and a
@@ -41,6 +54,18 @@ config_hash is computed from ALL FOUR runtime yaml files (the Phase 5/6 fix
 round's own "REMINDER for Phase 6/7 integration" — services/pipeline.py's
 compute_config_hash() docstring — finally acted on here) — is authored for
 this prototype.
+
+Secrets and config_hash (user requirement, added with OpenAI support):
+compute_config_hash() (services/pipeline.py) is called on _load_full_
+runtime_config()'s own return value below — the four RUNTIME_CONFIG_FILES
+read from config/*.yaml — and nothing else. No API key, of either
+provider, is ever read into that dict, passed to compute_config_hash(), or
+written to TurnRecord.config_hash — the scientific runtime config hash
+stays a function of the four frozen behavioral YAML sources only. Provider/
+model IDENTITY (which backend, which model string) is tracked separately,
+in TurnRecord.model_id (see _build_pipeline()'s own model_id parameter and
+each _init_*_session() function below) — never folded into config_hash,
+and never a secret itself (a model name, not a credential).
 """
 
 from __future__ import annotations
@@ -51,7 +76,7 @@ from pathlib import Path
 import streamlit as st
 import yaml
 
-from llm.adapter import AnthropicLLMAdapter, LLMAdapter, OfflineDemoAdapter
+from llm.adapter import AnthropicLLMAdapter, LLMAdapter, OfflineDemoAdapter, OpenAILLMAdapter
 from llm.fallback import FallbackTemplates
 from models.enums import Condition
 from models.goal_state import GoalState
@@ -79,8 +104,15 @@ DEFAULT_LOG_PATH = REPO_ROOT / "data" / "logs" / "turns.jsonl"
 RUNTIME_CONFIG_FILES = ("default.yaml", "conditions.yaml", "policy_rules.yaml", "demo_fixture.yaml")
 ALL_CONDITIONS = [Condition.TASK_FOCUSED, Condition.CURRENT_CUE, Condition.DYNAMIC]
 
-MOCK_BACKEND = "Mock (offline/replay)"
-LIVE_BACKEND = "Anthropic (live)"
+# Judgment call (documented gap, flagged for review): these three labels
+# replace Phase 7's first-delivery two-way "Mock (offline/replay)" /
+# "Anthropic (live)" radio — shortened to match the three-way selector the
+# user's own OpenAI-support request specified verbatim ("Backend: Offline /
+# OpenAI / Anthropic").
+OFFLINE_BACKEND = "Offline"
+OPENAI_BACKEND = "OpenAI"
+ANTHROPIC_BACKEND = "Anthropic"
+BACKEND_OPTIONS = [OFFLINE_BACKEND, OPENAI_BACKEND, ANTHROPIC_BACKEND]
 
 
 def _load_full_runtime_config() -> dict:
@@ -142,9 +174,9 @@ def _default_goal_state() -> GoalState:
     return load_demo_fixture(DEMO_FIXTURE_PATH).goal_state
 
 
-def _init_mock_session() -> SessionState:
-    """Mock (offline/replay) backend: OfflineDemoAdapter (llm/adapter.py) —
-    NOT MockLLMAdapter (Phase 3's test double) — replays config/
+def _init_mock_session() -> tuple[SessionState, str]:
+    """Offline backend: OfflineDemoAdapter (llm/adapter.py) — NOT
+    MockLLMAdapter (Phase 3's test double) — replays config/
     demo_fixture.yaml's own frozen H_t values by turn_id, unlimited number
     of times. Post-delivery fix (user review): MockLLMAdapter's queues are
     ONE-SHOT by design (a valued safety net in tests/), so a scripted queue
@@ -154,22 +186,31 @@ def _init_mock_session() -> SessionState:
     to be the RELIABLE offline fallback. See OfflineDemoAdapter's own
     docstring for the full account; tests/test_app_smoke.py's
     test_replay_after_full_demo_does_not_raise and
-    test_demo_scenario_runs_again_cleanly_after_reset both exercise this."""
+    test_demo_scenario_runs_again_cleanly_after_reset both exercise this.
+
+    Returns (session, model_id) — model_id is a fixed, non-secret label
+    ("offline-demo-fixture"), not a provider model string, shown in the
+    sidebar the same way both live backends' real model ids are (see
+    main()'s own "clearly show current backend/model" line)."""
     fixture = load_demo_fixture(DEMO_FIXTURE_PATH)
     raw_appraisal_by_turn_id = {turn.turn_id: dict(turn.raw_appraisal) for turn in fixture.turns}
     adapter = OfflineDemoAdapter(raw_appraisal_by_turn_id)
-    pipeline, rho_dynamic = _build_pipeline(adapter, model_id="mock-offline-replay")
+    model_id = "offline-demo-fixture"
+    pipeline, rho_dynamic = _build_pipeline(adapter, model_id=model_id)
     controller = ExperimentController(pipeline, rho_dynamic=rho_dynamic)
     controller.elicit_outcome_baseline(fixture.outcome_baseline_value_priorities)
-    return SessionState(controller, GoalStateManager(), fixture.goal_state)
+    return SessionState(controller, GoalStateManager(), fixture.goal_state), model_id
 
 
-def _init_live_session(api_key: str | None) -> SessionState:
-    """Anthropic (live) backend — a real, network-calling adapter.
-    api_key=None lets anthropic.Anthropic() fall back to its own documented
+def _init_live_session(api_key: str | None) -> tuple[SessionState, str]:
+    """Anthropic backend — a real, network-calling adapter. api_key=None
+    lets anthropic.Anthropic() fall back to its own documented
     ANTHROPIC_API_KEY environment-variable lookup; a key typed into the
     sidebar (when the environment variable is absent) is passed through
-    explicitly instead."""
+    explicitly instead — never stored anywhere beyond this local variable,
+    never logged, never folded into config_hash (see this module's own
+    docstring). Returns (session, model_id) for the sidebar's "current
+    backend/model" display."""
     import anthropic  # local import: only this live-backend path needs the real package installed
 
     client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
@@ -179,7 +220,36 @@ def _init_live_session(api_key: str | None) -> SessionState:
     goal_state = _default_goal_state()
     fixture = load_demo_fixture(DEMO_FIXTURE_PATH)
     controller.elicit_outcome_baseline(fixture.outcome_baseline_value_priorities)
-    return SessionState(controller, GoalStateManager(), goal_state)
+    return SessionState(controller, GoalStateManager(), goal_state), adapter.model
+
+
+def _init_openai_session(api_key: str | None) -> tuple[SessionState, str]:
+    """OpenAI backend — added post-delivery at the user's own explicit
+    request as a SECOND, optional live backend, strictly alongside
+    Anthropic (never replacing it) — a real, network-calling adapter.
+    Mirrors _init_live_session() above field for field, including its own
+    "never store/log the key" contract: api_key=None lets openai.OpenAI()
+    fall back to its own documented OPENAI_API_KEY environment-variable
+    lookup; a key typed into the sidebar (when the environment variable is
+    absent) is passed through explicitly instead.
+
+    Calls the exact same _build_pipeline() every other backend calls, with
+    no OpenAI-specific branch inside it — the scientific pipeline
+    (H_t -> D_t -> A*_t -> A_t -> P_t) is built identically regardless of
+    which LLMAdapter implementation is handed to it; only the adapter
+    object itself differs between this function and _init_live_session()
+    above. Returns (session, model_id) for the sidebar's own "current
+    backend/model" display."""
+    import openai  # local import: only this backend path needs the real package installed
+
+    client = openai.OpenAI(api_key=api_key) if api_key else openai.OpenAI()
+    adapter = OpenAILLMAdapter(client)
+    pipeline, rho_dynamic = _build_pipeline(adapter, model_id=adapter.model)
+    controller = ExperimentController(pipeline, rho_dynamic=rho_dynamic)
+    goal_state = _default_goal_state()
+    fixture = load_demo_fixture(DEMO_FIXTURE_PATH)
+    controller.elicit_outcome_baseline(fixture.outcome_baseline_value_priorities)
+    return SessionState(controller, GoalStateManager(), goal_state), adapter.model
 
 
 def _find_original_record(session: SessionState, turn_id: int, condition: Condition) -> TurnRecord | None:
@@ -207,45 +277,81 @@ def main() -> None:
         "See README.md for what is and is not frozen by the specification."
     )
 
-    env_key_present = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    anthropic_env_key_present = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    openai_env_key_present = bool(os.environ.get("OPENAI_API_KEY"))
     with st.sidebar:
         st.header("LLM backend")
+        # Judgment call (documented gap, flagged for review): with two live
+        # backends now possible, the default selection prefers whichever
+        # one has an environment credential already present, Anthropic
+        # first — this is a direct generalization of Phase 7's original
+        # two-way "default to live if ANTHROPIC_API_KEY is present, else
+        # Mock" rule (no test asserts a specific priority between the two
+        # live backends when BOTH env keys are present, since that
+        # combination wasn't previously reachable at all); Offline remains
+        # the default whenever neither key is present, unchanged.
+        if anthropic_env_key_present:
+            default_index = BACKEND_OPTIONS.index(ANTHROPIC_BACKEND)
+        elif openai_env_key_present:
+            default_index = BACKEND_OPTIONS.index(OPENAI_BACKEND)
+        else:
+            default_index = BACKEND_OPTIONS.index(OFFLINE_BACKEND)
         backend = st.radio(
-            "Backend", [MOCK_BACKEND, LIVE_BACKEND], index=1 if env_key_present else 0,
+            "Backend", BACKEND_OPTIONS, index=default_index,
             help=(
-                "Mock replays config/demo_fixture.yaml's frozen, analytically-verified scenario "
+                "Offline replays config/demo_fixture.yaml's frozen, analytically-verified scenario "
                 "with NO network calls — Phase 7's 'offline/replay fallback verified with network "
-                "disabled' check. Anthropic makes real API calls for live free-text rehearsal — "
-                "Phase 7's 'full live rehearsal × 10' check."
+                "disabled' check. OpenAI and Anthropic both make real API calls for live free-text "
+                "rehearsal — Phase 7's 'full live rehearsal × 10' check — and sit at the exact same "
+                "two boundaries (appraisal extraction, response generation); neither ever computes "
+                "D_t/A*_t/A_t/P_t itself."
             ),
         )
         api_key_input = None
-        if backend == LIVE_BACKEND and not env_key_present:
+        if backend == OPENAI_BACKEND and not openai_env_key_present:
+            api_key_input = st.text_input("OPENAI_API_KEY", type="password")
+            if not api_key_input:
+                st.warning("Enter an API key to use the OpenAI backend, or switch to Offline.")
+        elif backend == ANTHROPIC_BACKEND and not anthropic_env_key_present:
             api_key_input = st.text_input("ANTHROPIC_API_KEY", type="password")
             if not api_key_input:
-                st.warning("Enter an API key to use the live backend, or switch to Mock.")
+                st.warning("Enter an API key to use the Anthropic backend, or switch to Offline.")
+        # Neither api_key_input nor either *_env_key_present flag is ever
+        # written to st.session_state, logged, or included in config_hash
+        # (see this module's own docstring) — type="password" above also
+        # masks the field on-screen. The "current backend/model" caption
+        # below shows a MODEL id, never a key.
 
     if st.session_state.get("backend") != backend or "session" not in st.session_state:
         try:
-            if backend == MOCK_BACKEND:
-                st.session_state.session = _init_mock_session()
-            else:
-                if not (api_key_input or env_key_present):
+            if backend == OFFLINE_BACKEND:
+                session_obj, model_id = _init_mock_session()
+            elif backend == OPENAI_BACKEND:
+                if not (api_key_input or openai_env_key_present):
                     st.stop()
-                st.session_state.session = _init_live_session(api_key_input)
+                session_obj, model_id = _init_openai_session(api_key_input)
+            else:
+                if not (api_key_input or anthropic_env_key_present):
+                    st.stop()
+                session_obj, model_id = _init_live_session(api_key_input)
+            st.session_state.session = session_obj
             st.session_state.backend = backend
+            st.session_state["active_model_id"] = model_id
         except ImportError as exc:
             st.error(str(exc))
             st.stop()
 
     session: SessionState = st.session_state.session
 
+    with st.sidebar:
+        st.caption(f"Active backend: **{backend}** — model: `{st.session_state.get('active_model_id', '—')}`")
+
     controls = experiment_controls.render(session)
 
     if controls.reset_requested:
         # A brand new SessionState (not session.reset() on the existing
-        # one) is deliberate here, not merely simpler: Mock mode's adapter
-        # has a scripted, ONE-SHOT extract/generate queue (see
+        # one) is deliberate here, not merely simpler: Offline mode's
+        # adapter has a scripted, ONE-SHOT extract/generate queue (see
         # _init_mock_session's own docstring) — after a demo run consumes
         # it, session.reset() alone would leave a fresh run_id pointed at
         # an already-empty queue, so the next "Run demo_fixture.yaml" click
@@ -254,13 +360,20 @@ def main() -> None:
         # ["backend"] and letting the normal init branch below rebuild
         # everything from scratch (a fresh adapter with a freshly reloaded
         # queue, a fresh ExperimentController, a fresh SessionState) is the
-        # one reset path that is correct for BOTH backends — the Anthropic
-        # client rebuilt for the live case has no equivalent one-shot state
-        # to lose, so unifying on this path costs it nothing but
-        # reconstructing one lightweight client object.
+        # one reset path that is correct for ALL THREE backends — neither
+        # live client (OpenAI's or Anthropic's) rebuilt for its own branch
+        # has any equivalent one-shot state to lose, so unifying on this
+        # path costs either of them nothing but reconstructing one
+        # lightweight client object. This also guarantees requirement 7
+        # ("changing backend should rebuild the appropriate SessionState
+        # cleanly... do not reuse a Pipeline created for another
+        # provider"): switching the radio to a different backend value
+        # already takes the `st.session_state.get("backend") != backend`
+        # branch above on the very next rerun, with no reset click needed.
         del st.session_state["backend"]
         del st.session_state["session"]
         st.session_state.pop("last_replay", None)
+        st.session_state.pop("active_model_id", None)
         st.rerun()
 
     if controls.replay_request is not None:
@@ -273,7 +386,7 @@ def main() -> None:
             original = _find_original_record(session, turn_id, condition)
             st.session_state["last_replay"] = (original, replayed)
 
-    if backend == MOCK_BACKEND:
+    if backend == OFFLINE_BACKEND:
         st.subheader("Offline/replay: the frozen demo scenario")
         st.caption(
             "Runs config/demo_fixture.yaml's two turns through every condition, with NO network call "
