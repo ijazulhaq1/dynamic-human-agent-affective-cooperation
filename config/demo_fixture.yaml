@@ -1,0 +1,166 @@
+# config/demo_fixture.yaml — §19.9/§20.15's demo scenario. Phase 6 (blueprint
+# §10): "demo_fixture.yaml: multi-option/focal_option_id scenario tuned to
+# the analytical check, wired through compare()."
+#
+# READ THIS BEFORE EDITING A SINGLE NUMBER BELOW.
+#
+# Judgment call, decided together with the user, not the blueprint (see
+# services/demo_fixture.py's own module docstring and README.md's Phase 6
+# notes for the full record): the recovered frozen pre-implementation
+# specification freezes an ANALYTICAL CONTRACT for this scenario, not a
+# literal one. It pins down:
+#   - 2-3 options, pre-elicited explicit value_priorities, structured
+#     option-to-value impacts, required-evidence fields
+#   - stakes in [0.75, 0.85], autonomy_weight=0.90, safety_risk=0.20,
+#     no_undue_influence=true (always true on GoalState regardless)
+#   - Turn 1 must establish a HIGH state: a*_intv >= 0.65
+#   - Turn 2 must satisfy c_t>=0.60, h_ctrl>=0.40, h_int>=0.65, h_unc<0.70,
+#     d_amb<0.65, d_goal<0.65, safety_risk<0.70
+#   - CURRENT_CUE must fail at least one A-dependent REDIRECT threshold at
+#     Turn 2 (a_info>=0.55 / a_intv>=0.60 / h_int>=0.65 / c_t>=0.60)
+#   - DYNAMIC at rho=0.35 must clear a_info>=0.55 AND a_intv>=0.60 and
+#     select REDIRECT at Turn 2
+# It does NOT pin down option names, exact value_priorities numbers, exact
+# option-impact values, exact focal_option_id, or turn wording — those are
+# authored, implementation-level fixture content here.
+#
+# This scenario was NOT hand-guessed into satisfying those gates by trial
+# and error. It was engineered analytically, using the REAL formulas this
+# prototype already implements (services/state_transition.py's
+# a_mot/a_info/a_intv weights from config/default.yaml, services/
+# derived_features.py's d_goal/d_amb formulas) as calculators, then verified
+# end-to-end through the real Phase 1-5 code path (derive_interaction_state
+# -> LinearPersistenceTransition -> PolicyEngine.select) rather than
+# asserted by hand. tests/test_demo_fixture.py re-derives and re-checks
+# every one of these numbers at test time — the numbers below are not
+# "trust me," they are "and the test proves it, every run."
+#
+# THE CORE ENGINEERING IDEA: compare() computes ONE shared A*_t per turn;
+# only CURRENT_CUE (always rho=0, so A_t == A*_t exactly) and DYNAMIC
+# (rho=0.35, so A_t = 0.35*A_prev + 0.65*A*_t) ever apply it. So Turn 1 is
+# engineered to establish a HIGH A_1 (comfortably above every Turn-2
+# threshold) for both conditions alike (A_1 = A*_1 exactly at the first
+# affect-enabled turn, regardless of condition). Turn 2's own target A*_2 is
+# then engineered to fall JUST below the REDIRECT a_info/a_intv thresholds
+# — which is exactly what CURRENT_CUE experiences, since CURRENT_CUE's A_2
+# IS A*_2. DYNAMIC's rho=0.35-weighted blend of the still-high A_1 and the
+# just-under A*_2 climbs back ABOVE both thresholds. Two conditions, same
+# turn 2 input, genuinely different policy output — a real flip, not a
+# scripted one, and DYNAMIC's own counterfactual (state_did_influence_policy)
+# is True precisely because the A*_2-alone path would NOT have redirected.
+#
+# Verified numbers (config/default.yaml weights, computed by
+# services/state_transition.py and services/policy_engine.py, reproduced
+# here as a comment so a future reader doesn't have to re-derive them by
+# hand to sanity-check this file; tests/test_demo_fixture.py is the actual
+# source of truth, this comment is not):
+#   D_t   turn1: d_goal=0.48  d_amb=1.0
+#   D_t   turn2: d_goal=0.48  d_amb=0.3333...
+#   c_t   turn1: 0.70 (STRONG_INDIRECT)   turn2: 0.85 (EXPLICIT)
+#   A*_1: a_mot=0.89  a_info=0.7925  a_intv=0.71775   (>= 0.65 redirect gate, margin +0.068)
+#   A*_2: a_mot=0.83  a_info=0.435   a_intv=0.552      (BOTH below 0.55/0.60 -> CURRENT_CUE fails REDIRECT)
+#   DYNAMIC A_2 (rho=0.35 blend of A_1, A*_2):
+#         a_mot=0.851  a_info=0.560125 (margin +0.010)  a_intv=0.6100125 (margin +0.010) -> clears REDIRECT
+#
+# Resulting policy at Turn 2:
+#   TASK_FOCUSED: INFORM (structural — never sees A_t; could/did both False)
+#   CURRENT_CUE:  INFORM (falls through R_REDIRECT, R_CLARIFY; task_requires_evidence
+#                 fires R_INFORM) — could=True (a_star alone would not redirect either,
+#                 since a_star IS this condition's own A_2), did=False
+#   DYNAMIC:      REDIRECT (R_REDIRECT fires) — could=True, did=True: the
+#                 rho-blended persistence is what pushed this turn over the
+#                 line the A*_2-alone counterfactual would not have crossed.
+
+goal_state:
+  objective: "Decide whether to accept the startup's job offer over the two more established offers."
+  value_priorities:
+    security: 0.6
+    growth: 0.4
+  stakes: 0.80
+  task_constraints:
+    decision_deadline: "end of this week"
+  autonomy_weight: 0.90
+  safety_risk: 0.20
+  # no_undue_influence is Literal[True] on GoalState — always true, not set here.
+
+# Only the FOCAL option's impacts ever feed d_goal (services/derived_features.py
+# reads task_context["options"][focal_option_id] only) — enterprise_offer and
+# remote_offer are included so the scenario genuinely has 3 options with
+# structured impacts, as the frozen contract requires, even though only
+# startup_offer's impacts are read by any formula in this two-turn fixture.
+options:
+  startup_offer:
+    security: -0.4
+    growth: 0.9
+  enterprise_offer:
+    security: 0.7
+    growth: -0.2
+  remote_offer:
+    security: 0.1
+    growth: 0.3
+
+# Judgment call: pre-elicited BEFORE turn 1, frozen for the run — identical
+# to goal_state.value_priorities here since this fixture never updates G_t
+# mid-demo (OutcomeBaseline.value_priorities and GoalState.value_priorities
+# are two independently-sourced fields per §5.3/§20.4; they only happen to
+# start equal in this scenario, and nothing in Pipeline/DerivedFeatureService
+# ever assumes they must match).
+outcome_baseline:
+  value_priorities:
+    security: 0.6
+    growth: 0.4
+
+turns:
+  - turn_id: 1
+    user_text: >-
+      I got an offer from the startup, and I keep going back and forth. It's
+      double the equity and the kind of work I actually want to be doing,
+      but I still don't have anything in writing about the salary, and I
+      have no idea what their actual remote-work policy is versus what the
+      recruiter said in passing. My two other offers are both from
+      established companies with none of that uncertainty. I need to decide
+      by the end of the week and I can feel myself getting anxious every
+      time I think about it.
+    focal_option_id: startup_offer
+    required_evidence:
+      - field: "written salary confirmation"
+        status: missing
+      - field: "remote work policy details"
+        status: missing
+    appraisal:
+      goal_relevance: 0.95
+      goal_congruence: 0.1
+      uncertainty: 0.65
+      perceived_control: 0.55
+      agency: 0.5
+      affect_intensity: 0.95
+      possible_affect: "anxious anticipation"
+      evidence_tags: ["explicit_statement"]
+      evidence_strength: STRONG_INDIRECT
+
+  - turn_id: 2
+    user_text: >-
+      Update: I got the salary confirmation in writing, and it's actually
+      above what I was hoping for, and HR sent over the remote-work policy
+      too — it's exactly what I wanted. The only thing I still don't know is
+      what my team lead expects from me in the first 90 days, but honestly
+      I'm feeling a lot more excited than nervous about this now. I think
+      I'm leaning toward taking it.
+    focal_option_id: startup_offer
+    required_evidence:
+      - field: "written salary confirmation"
+        status: resolved
+      - field: "remote work policy details"
+        status: resolved
+      - field: "team lead's expectations for first 90 days"
+        status: unresolved
+    appraisal:
+      goal_relevance: 0.85
+      goal_congruence: 0.4
+      uncertainty: 0.30
+      perceived_control: 0.45
+      agency: 0.6
+      affect_intensity: 0.70
+      possible_affect: "growing enthusiasm"
+      evidence_tags: ["explicit_statement"]
+      evidence_strength: EXPLICIT

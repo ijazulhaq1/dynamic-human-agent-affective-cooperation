@@ -15,7 +15,7 @@ tests must be green before the next phase starts.
 | 3 | `llm/adapter.py` (mock first), `appraisal_estimator.py` | **done** — `tests/test_appraisal_estimator.py`, 134/134 green (whole suite) |
 | 4 | `response_generator.py` + fallback templates | **done** — `tests/test_generator_isolation.py`, 182 passed + 6 intentionally skipped (whole suite) |
 | 5 | `pipeline.py`, `experiment_controller.py`, `goal_state_manager.py`, `outcome_baseline.py`, `logger.py` | **done** — `tests/test_conditions.py`, `test_outcome_baseline.py`, `test_replay.py`, `test_experiment_controller.py` (+ `test_goal_state_manager.py`, `test_logger.py`), 219 passed + 6 intentionally skipped (whole suite) |
-| 6 | `demo_fixture.yaml` tuned to the analytical check, wired through `compare()` | not started |
+| 6 | `demo_fixture.yaml` tuned to the analytical check, wired through `compare()` | **done** — `tests/test_demo_fixture.py`, 225 passed + 6 intentionally skipped (whole suite) |
 | 7 | `ui/*` (Streamlit), real `llm/adapter.py` backend | not started |
 
 ## Running the tests
@@ -383,9 +383,165 @@ pytest -v
      (including `RESEARCHER_CONFIG`) was reviewed and confirmed acceptable
      as-is — not changed.
   - Result: 219 passed + 6 intentionally skipped (up from 214 passed).
-- Phase 6's `demo_fixture.yaml` is where the actual frozen demo-turn scenario
-  content (Turn 1 / Turn 2 task context, value priorities, etc.) from the
-  specification's §19.9/§20.15 belongs, and only there — it hasn't been
-  transcribed into this repo yet, is not a dependency of any earlier phase,
-  and should be pulled in and tuned to the analytical check when Phase 6 is
-  actually reached.
+- **Phase 6 (`config/demo_fixture.yaml`, `services/demo_fixture.py`) — the
+  frozen specification does NOT contain a literal §19.9/§20.15 scenario to
+  transcribe.** The note that used to sit here (through the Phase 5 delivery)
+  assumed such a scenario existed somewhere and just hadn't been pulled in
+  yet. That assumption was wrong, and it was corrected mid-project, not
+  discovered by this implementation on its own — worth recording exactly how,
+  since it changes what "frozen" means for every number in this fixture:
+  - This sandbox never had a copy of
+    `04_Prototype_Specification_Dynamic_Affective_Cooperation_Frozen_
+    PreImplementation.docx` (the document this repo's own header, and the
+    note above, both assumed existed). Only the Implementation Blueprint
+    docx is present here, and it only *references* §19.9/§20.15 — it never
+    reproduces their content. Four other architecture docx files available
+    in this sandbox were also checked; none contain a literal scenario
+    either.
+  - The user was asked how to proceed and, after checking their own
+    recovered copy of the actual frozen specification, confirmed directly:
+    even that source document freezes only an **analytical contract** for
+    this scenario, not literal values. The frozen contract is: 2-3 options;
+    pre-elicited explicit `value_priorities`; structured option-to-value
+    impacts; required-evidence fields; `stakes` in [0.75, 0.85];
+    `autonomy_weight=0.90`; `safety_risk=0.20`; `no_undue_influence=true`;
+    Turn 1 establishes `a*_intv >= 0.65`; Turn 2 satisfies `c_t>=0.60`,
+    `h_ctrl>=0.40`, `h_int>=0.65`, `h_unc<0.70`, `d_amb<0.65`, `d_goal<0.65`,
+    `safety_risk<0.70`; CURRENT_CUE must fail at least one A-dependent
+    REDIRECT threshold at Turn 2; DYNAMIC at `rho=0.35` must clear
+    `a_info>=0.55` and `a_intv>=0.60` and select REDIRECT. Option names,
+    turn wording, and every concrete `value_priorities`/option-impact number
+    are explicitly **not** pinned down by the frozen specification — the
+    user's own instruction was to author those as implementation-level
+    fixture content, "not by trial-and-error wording," and to verify the
+    result by running it through the real Phase 1-5 code rather than
+    asserting it by hand. **A researcher should treat `config/
+    demo_fixture.yaml`'s scenario text/numbers as authored fixture content
+    to review, not as a transcription of anything frozen — only the twelve
+    analytical gates listed above, and the fact that this fixture provably
+    satisfies every one of them, are the frozen/binding part.**
+  - The scenario actually built (`config/demo_fixture.yaml`): a 2-turn,
+    3-option career-decision fixture (`startup_offer` focal, plus
+    `enterprise_offer`/`remote_offer` for structure only — only the focal
+    option's impacts ever feed `d_goal`). It was **engineered analytically**,
+    not guessed: Turn 1's `H_t` is chosen so `a*_intv` clears 0.65 with a
+    healthy margin (0.71775); Turn 2's own target `A*_2` is engineered to
+    fall JUST below the REDIRECT `a_info`/`a_intv` thresholds (0.435/0.552 —
+    this is exactly what CURRENT_CUE experiences at Turn 2, since
+    CURRENT_CUE always runs at `rho=0`, so its `A_t` equals `A*_2` exactly);
+    DYNAMIC's `rho=0.35` blend of the still-high `A_1` and the just-under
+    `A*_2` climbs back above both thresholds (0.560125/0.6100125). Every one
+    of these numbers was computed by, and is re-verified at test time by,
+    the real `derive_interaction_state`/`LinearPersistenceTransition`/
+    `PolicyEngine` code — not copied out of a spreadsheet. **Wording
+    correction (user review):** DYNAMIC's Turn-2 crossing margins over the
+    REDIRECT thresholds are narrow by design (~+0.010 on both `a_info` and
+    `a_intv`), not a "clean" or "healthy" margin — earlier drafts of this
+    documentation used those words loosely. The narrowness is intentional
+    (the scenario is engineered so DYNAMIC just barely crosses the line
+    CURRENT_CUE stays just under) and is not a reliability concern, since
+    the whole trajectory is fully deterministic — no randomness anywhere in
+    Phase 1-5's code — so the same positive margin reproduces identically
+    on every run (`test_demo_fixture_repeatable` checks exactly this).
+    Turn 1's `a*_intv` margin (+0.068 over the 0.65 gate) is the one
+    genuinely comfortable margin in this scenario.
+  - `services/demo_fixture.py`: `DemoTurn`/`DemoFixture` are plain frozen
+    dataclasses (same rationale as Phase 2's `Ctx`/`Rule`, Phase 4's
+    `GenerationContract`). `load_demo_fixture()` parses and validates the
+    YAML before returning: it schema-validates each stored `HumanAppraisal`
+    (round-tripped through a real `HumanAppraisal(**...)` construction, so
+    an out-of-range field raises pydantic's `ValidationError` immediately)
+    and calls `validate_demo_fixture()` on the fully-parsed fixture, so a
+    scenario-level inconsistency raises `ScenarioConfigError` at load time
+    too — see the "Phase 6 fix round" entry below for why this wasn't true
+    of the first Phase 6 delivery. `validate_demo_fixture()` remains public
+    and separate from `load_demo_fixture()` so a deliberately-broken
+    in-process fixture can still be validated directly, with no second YAML
+    file on disk needed (see `test_focal_option_validation_fails_fast`).
+    `validate_demo_fixture()` has a docstring in `services/
+    derived_features.py`'s own `ScenarioConfigError` ("checked at
+    fixture-load time... before any turn runs") but no body anywhere in the
+    blueprint — implemented here by constructing a throwaway `Observation`
+    per turn and calling the REAL `derive_interaction_state(o_t, g_t)`
+    eagerly, so the exact same
+    `ScenarioConfigError` a broken scenario would raise mid-demo is instead
+    raised at load time, from ONE place, never duplicated logic that could
+    drift from the real formula. `run_demo_fixture()` elicits the fixture's
+    `OutcomeBaseline` once, then calls `ExperimentController.compare()` once
+    per turn, in order — this literally is the "wired through `compare()`"
+    requirement (blueprint §10 Phase 6's own line), and it is the exact same
+    `compare()` a live demo turn would call; there is no separate fixture-
+    replay code path.
+  - `tests/test_demo_fixture.py` implements the three tests the user asked
+    for by name (`test_demo_turn2_satisfies_redirect_eligibility_and_flips_
+    policy`, `test_demo_fixture_repeatable`, `test_focal_option_validation_
+    fails_fast`), plus two supporting tests
+    (`test_load_demo_fixture_matches_frozen_analytical_contract` as cheap
+    insurance against a future edit silently drifting outside the frozen
+    numeric-gate contract). The first test computes the fixture's actual
+    `D_t`/`A*_t`/`A_t`/policy through the real pipeline and asserts every one
+    of the twelve frozen gates plus the actual REDIRECT-vs-not policy flip
+    and the `state_could_influence_policy`/`state_did_influence_policy`
+    causal-instrumentation split between CURRENT_CUE (`could=True,
+    did=False`) and DYNAMIC (`could=True, did=True`) — not asserted by hand,
+    computed live. The repeatability test runs the whole fixture through two
+    fully independent `Pipeline`/`ExperimentController` instances and checks
+    every `D_t`/`c_t`/`A*_t`/`A_t`/policy field comes back numerically
+    identical, which it must, since nothing in Phase 1-5's code is
+    stochastic.
+  - Post-delivery correction, self-caught before delivery (not user-found):
+    the first draft of `test_demo_turn2_satisfies_redirect_eligibility_and_
+    flips_policy` checked DYNAMIC's Turn-2 `a_star.decision_information_
+    priority`/`a_star.intervention_readiness` against the REDIRECT
+    thresholds — but `compare()` computes ONE shared `a_star` per turn
+    (`a_star_shared`, §6.7), so DYNAMIC's `a_star` is identical to
+    CURRENT_CUE's, and would never clear the threshold either. The correct
+    quantity to check for DYNAMIC is `a_t` (the persisted, `rho`-blended
+    state) — `a_star` is the shared pre-persistence target every non-
+    TASK_FOCUSED condition reads, `a_t` is what actually differs between
+    CURRENT_CUE and DYNAMIC. Fixed before this delivery; the test now also
+    asserts `dynamic_turn2.a_star == cue_turn2.a_star` explicitly, so this
+    shared-target design is checked, not just relied on silently.
+  - Result: 223 passed + 6 intentionally skipped (up from 219 passed).
+- **Phase 6 fix round (post-delivery review): one real gap found and fixed
+  in `load_demo_fixture()`, with two parts, plus a wording correction.**
+  This is supposed to be the reliable, pre-validated offline interview
+  fallback, so a malformed prepared fixture must fail at load time, not
+  silently load and only surface a problem later, mid-demo.
+  1. **`load_demo_fixture()` never actually validated.** The first draft
+     parsed YAML into a `DemoFixture` and returned it without calling
+     `validate_demo_fixture()` — validation only happened if a caller
+     remembered to invoke that second function manually, contradicting the
+     blueprint's own "`ScenarioConfigError`... checked at fixture-load time
+     via `validate_demo_fixture()`" line (`services/derived_features.py`'s
+     own docstring) and this module's own (previously aspirational, not
+     actually enforced) claim to do so. Fixed: `load_demo_fixture()` now
+     calls `validate_demo_fixture(fixture)` on the fully-parsed fixture
+     before returning it — an unknown `focal_option_id` (or any other
+     scenario-level inconsistency) now raises `ScenarioConfigError` from
+     `load_demo_fixture()` itself. `validate_demo_fixture()` stays public
+     and separate so a test can still exercise it directly against a
+     deliberately-broken in-process fixture, with no second YAML file
+     needed. Covered by
+     `test_load_demo_fixture_fails_fast_on_invalid_focal_option`.
+  2. **Stored appraisals were never schema-validated at load time.** Each
+     turn's `appraisal` block was stored as a bare `dict(turn_raw[
+     "appraisal"])` — an out-of-range value like `affect_intensity: 5.0`
+     would load successfully and only be rejected later by
+     `AppraisalEstimator._validate()`, during a live-feeling demo run, via
+     its retry-then-fallback path. That is the right failure mode for a
+     genuinely flaky live LLM; it is the wrong one for a frozen fixture.
+     Fixed: `load_demo_fixture()` now constructs a real
+     `HumanAppraisal(**turn_raw["appraisal"])` per turn (raising pydantic's
+     `ValidationError` immediately on bad input) and stores
+     `validated_appraisal.model_dump(mode="json")` — the same flat-dict
+     shape `MockLLMAdapter`'s `extract_appraisal` queue and
+     `AppraisalEstimator._validate()` both already expect, so nothing
+     downstream of `DemoTurn.raw_appraisal` changed. Covered by
+     `test_load_demo_fixture_rejects_invalid_appraisal`.
+  3. Wording correction: this file previously described the scenario's
+     margins over the frozen thresholds as uniformly "clean"/"healthy."
+     DYNAMIC's Turn-2 crossing margins are narrow by design (~+0.010 on
+     both `a_info` and `a_intv`) — corrected above, where those margins are
+     first described, rather than restated a third time here.
+  - Result: 225 passed + 6 intentionally skipped (up from 223 passed).
