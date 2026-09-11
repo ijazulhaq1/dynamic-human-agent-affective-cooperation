@@ -4,6 +4,13 @@ Direct implementation of the architecture  per the Implementation Blueprint (`05
 Built in the phased order the blueprint's §10 specifies — each phase's own
 tests must be green before the next phase starts.
 
+## Running the app
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
 ## Status
 
 | Phase | Scope | Status |
