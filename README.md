@@ -1,7 +1,6 @@
 # Dynamic Affective Cooperation — prototype
 
-Direct implementation of the frozen architecture (`04_Prototype_Specification_Dynamic_Affective_Cooperation_Frozen_PreImplementation.docx`)
-per the Implementation Blueprint (`05_Implementation_Blueprint_Dynamic_Affective_Cooperation.docx`).
+Direct implementation of the architecture  per the Implementation Blueprint (`05_Implementation_Blueprint_Dynamic_Affective_Cooperation.docx`).
 Built in the phased order the blueprint's §10 specifies — each phase's own
 tests must be green before the next phase starts.
 
