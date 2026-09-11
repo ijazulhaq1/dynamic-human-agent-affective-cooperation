@@ -4,9 +4,6 @@
 
 This prototype investigates whether an AI agent can cooperate more appropriately with a human when it maintains a **bounded and interpretable interaction state across turns**, rather than responding only to the current message.
 
-The central research question is:
-
-> **Does temporally persistent affect-sensitive state improve human–AI cooperation compared with task-focused and current-cue-only agents?**
 
 ## Prototype Overview
 
