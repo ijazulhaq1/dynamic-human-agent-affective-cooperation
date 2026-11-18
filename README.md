@@ -91,7 +91,7 @@ cd dynamic-human-agent-affective-cooperation
 
 pip install -r requirements.txt
 
-streamlit run prototype/app.py
+streamlit run app.py
 ```
 
 LLM credentials, when required, should be provided through environment variables and are **not stored in the repository**.
